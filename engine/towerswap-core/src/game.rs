@@ -97,6 +97,17 @@ impl Dir {
     }
 }
 
+/// 드래그 결과 종류 (`drag_plan`)
+#[derive(Clone, Copy)]
+enum DragPlan {
+    Swap(TileId),
+    Repair,
+    Turret,
+    Anvil(TileId),
+    Toss,
+    Move,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionResult {
     Ok,
@@ -871,17 +882,16 @@ impl Game {
 
     // ───────────────────────── 낮 행동: 드래그 ─────────────────────────
 
-    /// 드래그(스왑·이동·버리기·성 보수·포탑·모루). 무효면 아무 일도 없다.
-    pub fn drag(&mut self, x: i32, y: i32, dir: Dir) -> ActionResult {
+    /// 드래그 판정: 유효하면 (끄는 타일, 결과). 상태를 바꾸지 않는다(행동 마스크용).
+    fn drag_plan(&self, x: i32, y: i32, dir: Dir) -> Option<(TileId, DragPlan)> {
         if self.phase != Phase::Idle {
-            return ActionResult::Invalid;
+            return None;
         }
-        let Some(nq) = self.tile_at(x, y) else { return ActionResult::Invalid };
+        let nq = self.tile_at(x, y)?;
         if self.tiles[nq].kind.unmovable() {
-            return ActionResult::Invalid;
+            return None;
         }
         let (nu, nb) = dir.delta();
-        self.loops += 1000;
         // $C
         let anvil = self.anvil_target(nq, nu, nb, true);
         let mut nz = None;
@@ -896,87 +906,111 @@ impl Game {
         // d9 내부 검사
         if nz.is_none() {
             if let Some(s) = self.tile_at(x + nu, y + nb) {
-                if self.tiles[s].kind == Kind::Anvil && self.anvil_target(nq, nu, nb, false).is_none() {
-                    return ActionResult::Invalid;
+                if self.tiles[s].kind == Kind::Anvil && anvil.is_none() {
+                    return None;
                 }
             }
         }
         // dR
         if let Some(z) = nz {
-            if z == nq || !self.swap_valid(nq, z) {
-                return ActionResult::Invalid;
-            }
-            // dB
-            let (ax, ay, bx, by) = (self.tiles[nq].gx, self.tiles[nq].gy, self.tiles[z].gx, self.tiles[z].gy);
-            self.set_grid(bx, by, Some(nq));
-            self.set_grid(ax, ay, Some(z));
-            self.tiles[nq].gx = bx;
-            self.tiles[nq].gy = by;
-            self.tiles[z].gx = ax;
-            self.tiles[z].gy = ay;
-            self.tiles[nq].moved_time = self.loops + 1;
-            self.tiles[z].moved_time = self.loops;
-            self.spend_swap(Some(nq), Some(z));
-            return ActionResult::Ok;
+            return (z != nq && self.swap_valid(nq, z)).then_some((nq, DragPlan::Swap(z)));
         }
         let (ex, ey) = (x + nu, y + nb);
         let kind = self.tiles[nq].kind;
-        // 성 보수
-        if kind == Kind::Stone && self.hearts < MAX_HEARTS && !self.closed_day() && y == 1 && nb < 0 {
-            self.remove_delete_and_replace(nq, true);
-            self.spend_swap(None, None);
-            self.hearts = (self.hearts + 1).min(MAX_HEARTS);
-            return ActionResult::Ok;
-        }
-        // 성 포탑 (mW)
-        if nb < 0 && y == 1 && self.turret_can_arm(nq, x) {
-            self.remove_delete_and_replace(nq, false);
-            self.tiles[nq].alive = false;
-            self.tiles[nq].gx = x;
-            self.tiles[nq].gy = 0;
-            self.turrets[x as usize] = Some(nq);
-            self.spend_swap(None, None);
-            return ActionResult::Ok;
-        }
-        // 모루 (dX → 확인창 → Upgrade)
-        if let Some(t) = self.anvil_target(nq, nu, nb, false) {
-            let (tx, ty) = (self.tiles[t].gx, self.tiles[t].gy);
-            if self.can_go_here(self.tiles[nq].kind, tx, ty) {
-                self.remove_from_grid(nq, false);
-                // 모루가 A 바로 위에 있었다면 방금 중력으로 한 칸 내려왔다. 원본은 내려온 위치를 쓴다.
-                let (tx, ty) = (self.tiles[t].gx, self.tiles[t].gy);
-                self.tiles[nq].gx = tx;
-                self.tiles[nq].gy = ty;
-                self.tiles[nq].moved_time = self.loops;
-                self.set_grid(tx, ty, Some(nq));
-            } else {
-                self.remove_from_grid(t, false);
-            }
-            self.delete_tile(t);
-            self.upgrade(nq);
-            self.phase = Phase::Fall;
-            self.spend_swap(Some(nq), None);
-            return ActionResult::Ok;
-        }
-        // 버리기 (dj → dz)
-        let toss = if kind == Kind::Iceberg { !Self::in_board(ex, ey) } else { !self.is_ground(ex, ey) };
-        if toss {
-            self.remove_from_grid(nq, false);
-            self.tiles[nq].removed = true;
-            self.tiles[nq].dragged_off_edge = true;
-            self.spend_swap(None, None);
-            return ActionResult::Ok;
-        }
-        // 빈 칸으로 이동 (dU)
-        if self.is_ground(ex, ey) == (kind != Kind::Iceberg) && Self::in_board(ex, ey) && self.tile_at(ex, ey).is_none() {
+        let plan = if kind == Kind::Stone && self.hearts < MAX_HEARTS && !self.closed_day() && y == 1 && nb < 0 {
+            DragPlan::Repair // 성 보수
+        } else if nb < 0 && y == 1 && self.turret_can_arm(nq, x) {
+            DragPlan::Turret // 성 포탑 (mW)
+        } else if let Some(t) = anvil {
+            DragPlan::Anvil(t) // 모루 (dX → 확인창 → Upgrade)
+        } else if if kind == Kind::Iceberg { !Self::in_board(ex, ey) } else { !self.is_ground(ex, ey) } {
+            DragPlan::Toss // 버리기 (dj → dz)
+        } else if self.is_ground(ex, ey) == (kind != Kind::Iceberg) && Self::in_board(ex, ey) && self.tile_at(ex, ey).is_none() {
             if self.is_slot(ex, ey) && kind != Kind::Cannon {
-                return ActionResult::Invalid;
+                return None;
             }
-            self.move_into_empty(nq, ex, ey);
-            self.spend_swap(Some(nq), None);
-            return ActionResult::Ok;
+            DragPlan::Move // 빈 칸으로 이동 (dU)
+        } else {
+            return None;
+        };
+        Some((nq, plan))
+    }
+
+    /// 드래그가 유효한지 (상태 변화 없음)
+    pub fn drag_valid(&self, x: i32, y: i32, dir: Dir) -> bool {
+        self.drag_plan(x, y, dir).is_some()
+    }
+
+    /// 드래그(스왑·이동·버리기·성 보수·포탑·모루). 무효면 아무 일도 없다.
+    pub fn drag(&mut self, x: i32, y: i32, dir: Dir) -> ActionResult {
+        if self.phase != Phase::Idle {
+            return ActionResult::Invalid;
         }
-        ActionResult::Invalid
+        let Some(nq) = self.tile_at(x, y) else { return ActionResult::Invalid };
+        if self.tiles[nq].kind.unmovable() {
+            return ActionResult::Invalid;
+        }
+        self.loops += 1000;
+        let Some((_, plan)) = self.drag_plan(x, y, dir) else { return ActionResult::Invalid };
+        let (nu, nb) = dir.delta();
+        let (ex, ey) = (x + nu, y + nb);
+        match plan {
+            DragPlan::Swap(z) => {
+                // dB
+                let (ax, ay, bx, by) = (self.tiles[nq].gx, self.tiles[nq].gy, self.tiles[z].gx, self.tiles[z].gy);
+                self.set_grid(bx, by, Some(nq));
+                self.set_grid(ax, ay, Some(z));
+                self.tiles[nq].gx = bx;
+                self.tiles[nq].gy = by;
+                self.tiles[z].gx = ax;
+                self.tiles[z].gy = ay;
+                self.tiles[nq].moved_time = self.loops + 1;
+                self.tiles[z].moved_time = self.loops;
+                self.spend_swap(Some(nq), Some(z));
+            }
+            DragPlan::Repair => {
+                self.remove_delete_and_replace(nq, true);
+                self.spend_swap(None, None);
+                self.hearts = (self.hearts + 1).min(MAX_HEARTS);
+            }
+            DragPlan::Turret => {
+                self.remove_delete_and_replace(nq, false);
+                self.tiles[nq].alive = false;
+                self.tiles[nq].gx = x;
+                self.tiles[nq].gy = 0;
+                self.turrets[x as usize] = Some(nq);
+                self.spend_swap(None, None);
+            }
+            DragPlan::Anvil(t) => {
+                let (tx, ty) = (self.tiles[t].gx, self.tiles[t].gy);
+                if self.can_go_here(self.tiles[nq].kind, tx, ty) {
+                    self.remove_from_grid(nq, false);
+                    // 모루가 A 바로 위에 있었다면 방금 중력으로 한 칸 내려왔다. 원본은 내려온 위치를 쓴다.
+                    let (tx, ty) = (self.tiles[t].gx, self.tiles[t].gy);
+                    self.tiles[nq].gx = tx;
+                    self.tiles[nq].gy = ty;
+                    self.tiles[nq].moved_time = self.loops;
+                    self.set_grid(tx, ty, Some(nq));
+                } else {
+                    self.remove_from_grid(t, false);
+                }
+                self.delete_tile(t);
+                self.upgrade(nq);
+                self.phase = Phase::Fall;
+                self.spend_swap(Some(nq), None);
+            }
+            DragPlan::Toss => {
+                self.remove_from_grid(nq, false);
+                self.tiles[nq].removed = true;
+                self.tiles[nq].dragged_off_edge = true;
+                self.spend_swap(None, None);
+            }
+            DragPlan::Move => {
+                self.move_into_empty(nq, ex, ey);
+                self.spend_swap(Some(nq), None);
+            }
+        }
+        ActionResult::Ok
     }
 
     /// `gq`: 스왑 유효성

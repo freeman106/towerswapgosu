@@ -82,13 +82,45 @@ impl Game {
     }
 
     pub fn fairy_can_target(&self, x: i32, y: i32) -> bool {
-        if self.phase != Phase::FairyTarget || !(1..=COLS as i32).contains(&x) || !(0..=ROWS as i32).contains(&y) {
+        self.phase == Phase::FairyTarget && self.fairy_target_ok(self.pending.fairy_src.unwrap(), x, y)
+    }
+
+    /// 요정이 src 타일을 (x, y)에 놓을 수 있는지 (단계 검사 없음)
+    pub(crate) fn fairy_target_ok(&self, src: TileId, x: i32, y: i32) -> bool {
+        if !(1..=COLS as i32).contains(&x) || !(0..=ROWS as i32).contains(&y) {
             return false;
         }
-        let src = self.pending.fairy_src.unwrap();
         match if y >= 1 { self.tile_at(x, y) } else { None } {
             Some(z) => self.swap_valid(src, z),
             None => self.can_place(self.tiles[src].kind, self.tiles[src].tier, x, y),
+        }
+    }
+
+    /// 요정이 src를 놓을 곳이 하나라도 있는지
+    pub fn fairy_source_has_target(&self, src: TileId) -> bool {
+        (0..=ROWS as i32).any(|y| (1..=COLS as i32).any(|x| self.fairy_target_ok(src, x, y)))
+    }
+
+    /// 요정으로 할 수 있는 이동이 하나라도 있는지 (집을 타일 × 놓을 곳)
+    pub fn fairy_any_move(&self) -> bool {
+        (1..=ROWS as i32).any(|y| {
+            (1..=COLS as i32).any(|x| {
+                self.tile_at(x, y).map_or(false, |t| self.tiles[t].kind != Kind::Fairy && self.fairy_source_has_target(t))
+            })
+        })
+    }
+
+    /// 탭이 유효한지 (상태 변화 없음)
+    pub fn tap_valid(&self, x: i32, y: i32) -> bool {
+        if !matches!(self.phase, Phase::Idle | Phase::Dusk) {
+            return false;
+        }
+        let Some(t) = self.tile_at(x, y) else { return false };
+        match self.tiles[t].kind {
+            Kind::Chest => !self.closed_day(),
+            Kind::Cannon | Kind::Tnt | Kind::Fairy => true,
+            Kind::FairyHouse => self.tiles[t].frame > 1,
+            _ => false,
         }
     }
 
@@ -96,17 +128,12 @@ impl Game {
 
     /// 무료 탭 행동: 상자 열기, 대포 방향 전환, TNT 메뉴, 요정 사용
     pub fn tap(&mut self, x: i32, y: i32) -> ActionResult {
-        if !matches!(self.phase, Phase::Idle | Phase::Dusk) {
+        if !self.tap_valid(x, y) {
             return ActionResult::Invalid;
         }
-        let Some(t) = self.tile_at(x, y) else { return ActionResult::Invalid };
+        let t = self.tile_at(x, y).unwrap();
         match self.tiles[t].kind {
-            Kind::Chest => {
-                if self.closed_day() {
-                    return ActionResult::Invalid;
-                }
-                self.open_chest(t);
-            }
+            Kind::Chest => self.open_chest(t),
             Kind::Cannon => {
                 let tile = &mut self.tiles[t];
                 tile.flipped_preferred = !tile.flipped_preferred;
@@ -118,9 +145,7 @@ impl Game {
                 self.pending.tnt_cancelable = true;
                 self.phase = Phase::TntMenu;
             }
-            Kind::Fairy => self.fairy_start(t),
-            Kind::FairyHouse if self.tiles[t].frame > 1 => self.fairy_start(t),
-            _ => return ActionResult::Invalid,
+            _ => self.fairy_start(t), // Fairy, 충전된 FairyHouse
         }
         ActionResult::Ok
     }
