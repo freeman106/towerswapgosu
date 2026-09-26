@@ -43,6 +43,14 @@ def parse_args():
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--norm-reward", type=int, default=1, help="할인 누적 보상의 이동 표준편차로 보상을 나눈다")
     p.add_argument("--chest-bonus", default="", help="등급 1..4 상자를 게임에서 처음 만들 때의 보상, 예: 0.1,0.5,2,5")
+    p.add_argument("--start-level", type=int, default=0, help="연습 시작 상태의 난이도 (1: 교환 한 번이면 상자 합성 … 4), 0이면 없음")
+    p.add_argument("--start-pool", type=int, default=4000, help="연습 시작 상태 수")
+    p.add_argument("--start-frac", type=float, default=0.2, help="새 게임을 연습 상태에서 시작할 확률")
+    p.add_argument("--aux-coef", type=float, default=0.0,
+                   help="합성 보조 손실 계수: 합성이 유리하다고 확인된 연습 시작 상태에서 -log Σ_{a∈M(s)} π(a|s)")
+    p.add_argument("--aux-confirm", type=int, default=4, help="합성 유불리 확인에 쓰는 밤 시뮬레이션 시드 쌍 수")
+    p.add_argument("--aux-target", type=float, default=0.3, help="연습 게임 합성 선택률이 이 값을 넘으면 계수를 줄이기 시작")
+    p.add_argument("--aux-decay", type=int, default=100, help="계수를 0으로 줄이는 데 걸리는 업데이트 수")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--channels", type=int, default=32)
@@ -131,7 +139,9 @@ class RunningStd:
 
 SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest",
                 "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
-                "chest_ge2", "chest_ge3", "chest_ge4"]
+                "chest_ge2", "chest_ge3", "chest_ge4", "hold1_steps", "hold1_days", "max_held1",
+                "merge_opps", "merge_take"]
+PRACTICE_KEYS = ["p_episodes", "p_merge_opps", "p_merge_take", "p_made2"]
 
 
 def episode_summary(fin):
@@ -148,7 +158,25 @@ def episode_summary(fin):
         s[f"made{t + 1}"], s[f"opened{t + 1}"] = made[:, t].mean(), opened[:, t].mean()
     for k in (2, 3, 4):
         s[f"chest_ge{k}"] = (mc >= k).mean()
+    n_open1 = opened[:, 0].sum()
+    s["hold1_steps"] = sum(f["hold_steps"][0] for f in fin) / n_open1 if n_open1 else float("nan")
+    s["hold1_days"] = sum(f["hold_days"][0] for f in fin) / n_open1 if n_open1 else float("nan")
+    s["max_held1"] = col("max_normal_held").mean()
+    opps = col("merge_opps")
+    s["merge_opps"] = opps.mean()
+    s["merge_take"] = col("merge_taken").sum() / opps.sum() if opps.sum() else float("nan")
     return s
+
+
+def practice_summary(fin):
+    """연습 시작 게임의 요약: 게임 수, 게임당 합성 기회, 합성 선택 비율, 동상자 생성 비율"""
+    p = [f for f in fin if f["practice"]]
+    if not p:
+        return None
+    opps = sum(f["merge_opps"] for f in p)
+    return {"p_episodes": len(p), "p_merge_opps": opps / len(p),
+            "p_merge_take": sum(f["merge_taken"] for f in p) / opps if opps else float("nan"),
+            "p_made2": float(np.mean([f["made"][1] > 0 for f in p]))}
 
 
 def format_summary(s):
@@ -157,7 +185,9 @@ def format_summary(s):
     return (f"게임 {s['episodes']} 점수 {s['score']:.0f} day {s['day']:.2f}(최대 {s['day_max']:.0f}) | "
             f"보상 생존 {s['r_survival']:.3f} 보스 {s['r_boss']:.2f} 상자 {s['r_chest']:.2f} | "
             f"상자 생성 {s['made1']:.2f}/{s['made2']:.2f}/{s['made3']:.2f}/{s['made4']:.2f} "
-            f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f}")
+            f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f} | "
+            f"일반 보관 {s['hold1_steps']:.1f}행동·{s['hold1_days']:.2f}일, 최대 보유 {s['max_held1']:.2f}, "
+            f"합성 기회 {s['merge_opps']:.2f}·선택 {s['merge_take']:.0%}")
 
 
 def masked_dist(logits, mask):
@@ -174,6 +204,12 @@ def main():
     N, T = args.num_envs, args.num_steps
     chest_bonus = [float(x) for x in args.chest_bonus.split(",")] if args.chest_bonus else None
     env = ts.VecEnv(N, seed=args.seed, threads=args.threads, chest_bonus=chest_bonus)
+    if args.start_level:
+        t0 = time.time()
+        env.build_start_pool(args.start_pool, args.start_level, seed=args.seed,
+                             confirm_samples=args.aux_confirm if args.aux_coef > 0 else 0)
+        env.set_start_frac(args.start_frac)
+        print(f"연습 시작 상태 {env.start_pool_info()} (난이도 {args.start_level}, {time.time() - t0:.0f}s), 비율 {args.start_frac}")
     grid = np.zeros((N, C, H, W), np.float32)
     scal = np.zeros((N, S), np.float32)
     mask = np.zeros((N, A), bool)
@@ -206,13 +242,17 @@ def main():
     b_rew = torch.zeros((T, N), device=dev)
     b_done = torch.zeros((T, N), device=dev)
     b_days = torch.zeros((T, N), device=dev)
+    b_aux = torch.zeros((T, N), dtype=torch.bool, device=dev)  # 보조 손실 대상 여부
+    b_auxt = torch.zeros((T, N, A), dtype=torch.bool, device=dev)  # 합성 행동 집합 M(s)
+    aux_flag, aux_tgt = np.zeros(N, bool), np.zeros((N, A), bool)
+    aux_decay_from = None  # 계수를 줄이기 시작한 업데이트
 
     n_updates = args.total_steps // (N * T)
     log_f = open(os.path.join(run_dir, "log.csv"), "a", newline="")
     log = csv.writer(log_f)
     if start_update == 1:
-        log.writerow(["update", "step", "sps"] + SUMMARY_KEYS +
-                     ["pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var"])
+        log.writerow(["update", "step", "sps"] + SUMMARY_KEYS + PRACTICE_KEYS +
+                     ["pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var", "aux_coef", "aux_merge_p"])
     t_start, step0 = time.time(), global_step
     ep_hist = []
     rstd = RunningStd(N)
@@ -229,6 +269,10 @@ def main():
             s = torch.from_numpy(scal).to(dev)
             m = torch.from_numpy(mask).to(dev)
             b_grid[t], b_scal[t], b_mask[t] = g, s, m
+            if args.aux_coef > 0:
+                env.aux_targets(aux_flag, aux_tgt)
+                b_aux[t] = torch.from_numpy(aux_flag).to(dev)
+                b_auxt[t] = torch.from_numpy(aux_tgt).to(dev)
             with torch.no_grad():
                 logits, v = agent(g, s)
                 dist = masked_dist(logits, m)
@@ -261,6 +305,12 @@ def main():
             ret = adv + b_val
 
         # ── 학습 ──
+        # 보조 손실 계수: 연습 게임의 합성 선택률이 목표를 넘으면 aux_decay 업데이트에 걸쳐 0으로
+        aux_c = args.aux_coef
+        if aux_c > 0 and aux_decay_from is not None:
+            aux_c *= max(0.0, 1.0 - (update - aux_decay_from) / args.aux_decay)
+        fx, fxt = b_aux.reshape(-1), b_auxt.reshape(-1, A)
+        aux_stats = []
         fg, fs, fm = b_grid.reshape(-1, C, H, W), b_scal.reshape(-1, S), b_mask.reshape(-1, A)
         fa, flp, fadv, fret, fval = b_act.reshape(-1), b_logp.reshape(-1), adv.reshape(-1), ret.reshape(-1), b_val.reshape(-1)
         bs = N * T
@@ -283,6 +333,13 @@ def main():
                     loss = args.vf_coef * v_loss
                 else:
                     loss = pg + args.vf_coef * v_loss - args.ent_coef * ent
+                    sel = fx[idx]
+                    if aux_c > 0 and bool(sel.any()):
+                        lp = logits[sel].masked_fill(~fm[idx][sel], -1e9).log_softmax(1)
+                        merge_lp = lp.masked_fill(~fxt[idx][sel], -1e9).logsumexp(1)  # log Σ_{a∈M} π(a|s)
+                        l_aux = -merge_lp.mean()
+                        loss = loss + aux_c * l_aux
+                        aux_stats.append(merge_lp.detach().exp().mean())
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -300,13 +357,23 @@ def main():
         fin = env.pop_finished()
         ep_hist = (ep_hist + fin)[-2000:]
         sps = (global_step - step0) / (time.time() - t_start)
-        s = episode_summary(fin)
-        log.writerow([update, global_step, int(sps)] + [s[k] if s else "" for k in SUMMARY_KEYS] + st + [ev])
+        s, ps = episode_summary([f for f in fin if not f["practice"]]), practice_summary(fin)
+        aux_p = torch.stack(aux_stats).mean().item() if aux_stats else float("nan")
+        if args.aux_coef > 0 and aux_decay_from is None:
+            pr = practice_summary(ep_hist)
+            if pr and pr["p_merge_take"] >= args.aux_target:
+                aux_decay_from = update
+                print(f"연습 합성 선택률 {pr['p_merge_take']:.0%} ≥ {args.aux_target:.0%}: 보조 손실 계수를 줄이기 시작", flush=True)
+        log.writerow([update, global_step, int(sps)] + [s[k] if s else "" for k in SUMMARY_KEYS] +
+                     [ps[k] if ps else "" for k in PRACTICE_KEYS] + st + [ev, aux_c, aux_p])
         log_f.flush()
         if update % 5 == 0 or update == 1:
-            print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 최근 "
-                  f"{format_summary(episode_summary(ep_hist))} | "
-                  f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}", flush=True)
+            ps = practice_summary(ep_hist)
+            pr = f" | 연습 {ps['p_episodes']}게임 합성 기회 {ps['p_merge_opps']:.2f}·선택 {ps['p_merge_take']:.0%}·동 {ps['p_made2']:.0%}" if ps else ""
+            print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 정상 시작 "
+                  f"{format_summary(episode_summary([f for f in ep_hist if not f['practice']]))}{pr} | "
+                  f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}"
+                  + (f" | 보조 계수 {aux_c:.3f} 합성 확률 {aux_p:.3f}" if args.aux_coef > 0 else ""), flush=True)
         if update % args.save_every == 0 or update == n_updates:
             torch.save({"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,
                         "global_step": global_step, "args": vars(args), "rstd": (rstd.mean, rstd.var, rstd.count)},

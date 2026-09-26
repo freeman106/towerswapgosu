@@ -1,4 +1,5 @@
 //! Tower Swap 게임 엔진 (원본 game.js v120 규칙 재현). 명세: docs/tower_swap_rules_spec.md
+pub mod analysis;
 pub mod env;
 pub mod expert;
 pub mod game;

@@ -73,6 +73,7 @@ pub struct Tile {
     pub dragged_off_edge: bool,
     pub alive: bool, // 원본 ak 목록에 있는지
     pub reload: f64, // 밤 재장전 (reloadDelay)
+    pub born: (u64, i32), // 통계: 상자가 된 시점 (행동 수 stat_steps, 날)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +136,9 @@ pub struct Game {
     /// 통계: 등급별 상자 생성 수(합성·상점·악마 거래), 개봉 수. 게임 규칙에는 영향이 없다
     pub chest_made: [u32; 5],
     pub chest_opened: [u32; 5],
+    /// 통계: 환경이 센 행동 수, 등급별 상자 보관 기간 합(생성→개봉, 행동 수와 날)
+    pub stat_steps: u64,
+    pub chest_hold: [(u64, u64); 5],
     pub combo: i32,        // rg
     pub loops: i64,        // ea.loops 대용 (순서만 의미 있음)
     // 스왑 직후 첫 매치 판정에서 우선하는 타일 (nV, nJ)
@@ -238,6 +242,7 @@ impl Game {
             dragged_off_edge: false,
             alive: true,
             reload: 0.0,
+            born: (0, 0),
         });
         self.ak.push(id);
         id
@@ -359,6 +364,7 @@ impl Game {
         }
         t.moved_time = loops;
         if up == Kind::Chest {
+            t.born = (self.stat_steps, self.day);
             let tier = t.tier.min(4) as usize;
             self.chest_made[tier] += 1;
         }
@@ -422,6 +428,18 @@ impl Game {
         self.delete_tile(id);
     }
 
+    /// 통계 카운터를 비운다 (저장한 상태에서 새 에피소드를 시작할 때)
+    pub fn reset_stats(&mut self) {
+        self.chest_made = [0; 5];
+        self.chest_opened = [0; 5];
+        self.chest_hold = [(0, 0); 5];
+        self.stat_steps = 0;
+        let day = self.day;
+        for t in self.tiles.iter_mut() {
+            t.born = (0, day);
+        }
+    }
+
     // ───────────────────────── 새 게임 ─────────────────────────
 
     /// 새 게임: `gz()`(보드 생성) → `_X(!0)` → 자동 매치 해소까지 진행
@@ -445,6 +463,8 @@ impl Game {
             deals_declined: 0,
             chest_made: [0; 5],
             chest_opened: [0; 5],
+            stat_steps: 0,
+            chest_hold: [(0, 0); 5],
             combo: 0,
             loops: 0,
             swap_a: None,

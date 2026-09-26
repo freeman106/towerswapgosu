@@ -11,8 +11,9 @@ pub fn lcg(s: &mut u64) -> u64 {
     *s >> 33
 }
 
-/// 휴리스틱 파라미터. 환경변수 TS_EXPERT="swap=0.2,c1=6,..."로 바꿀 수 있다(조정 실험용).
-struct Params {
+/// 휴리스틱 파라미터. 기본값은 환경변수 TS_EXPERT="swap=0.2,c1=6,..."로 바꿀 수 있다(조정 실험용).
+#[derive(Clone)]
+pub struct Params {
     swap: f64,       // 스왑 1개의 가치
     chest: [f64; 5], // 상자 등급별 가치(스왑 단위). 기본은 개봉 스왑(2, 12, 70, 380): 스왑 + 상자 = 경제 가치
     treasure: f64,   // 보물 1개의 가치(스왑 단위)
@@ -20,7 +21,15 @@ struct Params {
     heart: f64,
 }
 
-fn params() -> &'static Params {
+impl Params {
+    /// 상자를 모으는 설정: 상자를 합쳐서 얻을 스왑으로 평가하고, 밤 직전에는 은상자 이상만 연다.
+    /// 생존은 약하지만(평균 day 약 12) 동상자를 자주 만든다. 연습 시작 상태를 만드는 데 쓴다.
+    pub fn hoarding() -> Params {
+        Params { swap: 0.2, chest: [0.0, 6.0, 30.0, 140.0, 380.0], treasure: 2.0, dusk_tier: 3, heart: 1.5 }
+    }
+}
+
+pub fn params() -> &'static Params {
     static P: std::sync::OnceLock<Params> = std::sync::OnceLock::new();
     P.get_or_init(|| {
         let mut p = Params { swap: 0.2, chest: [0.0, 2.0, 12.0, 70.0, 380.0], treasure: 0.0, dusk_tier: 1, heart: 3.0 };
@@ -43,10 +52,13 @@ fn params() -> &'static Params {
 /// 보드 평가: 타워 방어력 + 상자(스왑 환산) + 하트 + 스왑.
 /// 정석(상자를 최대한 합친 뒤 열어 대량의 스왑으로 필드를 키운다)을 따르도록 상자를 합칠수록 가치가 커진다.
 pub fn heuristic(g: &Game) -> f64 {
+    heuristic_with(g, params())
+}
+
+pub fn heuristic_with(g: &Game, p: &Params) -> f64 {
     if g.phase == Phase::GameOver {
         return -1e9;
     }
-    let p = params();
     let w = |kind: Kind, tier: u8| -> f64 {
         let t = 3f64.powi(tier.max(1) as i32 - 1);
         match kind {
@@ -83,13 +95,13 @@ fn skipped(g: &Game, a: usize) -> bool {
 /// 행동 a 뒤의 평가. TNT 창을 여는 탭은 이어지는 최선의 폭파까지 본다.
 /// 복제본의 난수는 `seeds`로 바꾼다: 실제 게임의 미래(떨어질 타일, 상자 내용물)를 보지 않는다.
 /// 한 결정 안에서는 모든 후보가 같은 시드를 쓰므로 난수를 쓰지 않는 수끼리는 결과가 같다.
-fn lookahead(env: &Env, a: usize, seeds: (u32, u32)) -> f64 {
+fn lookahead(env: &Env, a: usize, seeds: (u32, u32), p: &Params) -> f64 {
     let mut e = env.clone();
     e.game.rng_v = JsRng::new(seeds.0);
     e.game.rng_m = JsRng::new(seeds.1);
     e.step(a).unwrap();
     if e.game.phase != Phase::TntMenu {
-        return heuristic(&e.game);
+        return heuristic_with(&e.game, p);
     }
     let mut m = [false; N_ACTIONS];
     e.mask(&mut m);
@@ -98,7 +110,7 @@ fn lookahead(env: &Env, a: usize, seeds: (u32, u32)) -> f64 {
         .map(|b| {
             let mut f = e.clone();
             f.step(b).unwrap();
-            heuristic(&f.game)
+            heuristic_with(&f.game, p)
         })
         .fold(f64::NEG_INFINITY, f64::max)
 }
@@ -106,6 +118,11 @@ fn lookahead(env: &Env, a: usize, seeds: (u32, u32)) -> f64 {
 /// greedy의 최선 행동 집합(휴리스틱 동점 전부)을 `set`에 표시하고, 그중 하나를 무작위로 고른다.
 /// `mask`는 env.mask()의 결과
 pub fn greedy_set(env: &Env, mask: &[bool], set: &mut [bool], rng: &mut u64) -> usize {
+    greedy_set_with(env, mask, set, rng, params())
+}
+
+/// `greedy_set`을 주어진 파라미터로
+pub fn greedy_set_with(env: &Env, mask: &[bool], set: &mut [bool], rng: &mut u64, p: &Params) -> usize {
     set.fill(false);
     let g = &env.game;
     let one = |set: &mut [bool], a: usize| {
@@ -124,7 +141,7 @@ pub fn greedy_set(env: &Env, mask: &[bool], set: &mut [bool], rng: &mut u64) -> 
             for a in A_CELL..A_YES {
                 let c = a - A_CELL;
                 if mask[a]
-                    && g.grid[c % 6 + 1][c / 6].map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= params().dusk_tier)
+                    && g.grid[c % 6 + 1][c / 6].map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= p.dusk_tier)
                 {
                     set[a] = true;
                 }
@@ -134,13 +151,13 @@ pub fn greedy_set(env: &Env, mask: &[bool], set: &mut [bool], rng: &mut u64) -> 
             }
         }
         _ => {
-            let base = heuristic(g);
+            let base = heuristic_with(g, p);
             let seeds = (lcg(rng) as u32 | 1, lcg(rng) as u32 | 1);
             let mut vals = [f64::NEG_INFINITY; N_ACTIONS];
             let mut best = f64::NEG_INFINITY;
             for a in 0..N_ACTIONS {
                 if mask[a] && a != A_END_DAY && !skipped(g, a) {
-                    vals[a] = lookahead(env, a, seeds);
+                    vals[a] = lookahead(env, a, seeds, p);
                     best = best.max(vals[a]);
                 }
             }
@@ -162,4 +179,42 @@ pub fn greedy_set(env: &Env, mask: &[bool], set: &mut [bool], rng: &mut u64) -> 
 pub fn greedy_action(env: &Env, mask: &[bool], rng: &mut u64) -> usize {
     let mut set = [false; N_ACTIONS];
     greedy_set(env, mask, &mut set, rng)
+}
+
+/// 행동 `first`를 한 뒤 greedy(기본 파라미터)로 그날을 마치고 밤을 넘긴 결과: (죽었는지, 잃은 하트).
+/// 복제본의 난수는 `seeds`로 바꾼다(실제 게임의 미래를 보지 않는다).
+pub fn rollout_night(env: &Env, first: usize, seeds: (u32, u32), rng: &mut u64) -> (bool, i32) {
+    let mut e = env.clone();
+    e.game.rng_v = JsRng::new(seeds.0);
+    e.game.rng_m = JsRng::new(seeds.1);
+    let (day, hearts) = (e.game.day, e.game.hearts);
+    if e.step(first).is_none() {
+        return (false, 0);
+    }
+    let mut m = [false; N_ACTIONS];
+    for _ in 0..5000 {
+        if e.done() || e.game.day != day {
+            break;
+        }
+        e.mask(&mut m);
+        let a = greedy_action(&e, &m, rng);
+        e.step(a).unwrap();
+    }
+    (e.done(), hearts - e.game.hearts.max(0))
+}
+
+/// 합성 행동 `merge`가 상자 개봉 `open`보다 그날 밤 생존에 나쁘지 않은지: 같은 시드 `samples`쌍으로 비교해
+/// 사망 수가 많지 않고 평균 잃은 하트가 0.5 이상 많지 않으면 참
+pub fn merge_not_worse(env: &Env, merge: usize, open: usize, samples: u32, rng: &mut u64) -> bool {
+    let (mut dm, mut dopen, mut lm, mut lo) = (0, 0, 0, 0);
+    for _ in 0..samples {
+        let seeds = (lcg(rng) as u32 | 1, lcg(rng) as u32 | 1);
+        let (d1, l1) = rollout_night(env, merge, seeds, rng);
+        let (d2, l2) = rollout_night(env, open, seeds, rng);
+        dm += d1 as u32;
+        dopen += d2 as u32;
+        lm += l1;
+        lo += l2;
+    }
+    dm <= dopen && (lm - lo) as f64 / samples as f64 <= 0.5
 }

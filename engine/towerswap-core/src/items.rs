@@ -155,6 +155,10 @@ impl Game {
     /// `treasureChestOpen`
     fn open_chest(&mut self, t: TileId) {
         let tier = self.tiles[t].tier;
+        let (bs, bd) = self.tiles[t].born;
+        let h = &mut self.chest_hold[tier.min(4) as usize];
+        h.0 += self.stat_steps - bs.min(self.stat_steps);
+        h.1 += (self.day - bd).max(0) as u64;
         self.chest_opened[tier.min(4) as usize] += 1;
         if tier > 0 {
             self.add_swaps(chest_swaps(tier));
@@ -363,6 +367,7 @@ impl Game {
                 DevilOffer::Place { kind, tier, tile } => {
                     if kind == Kind::Chest {
                         self.chest_made[tier.min(4) as usize] += 1;
+                        self.tiles[tile].born = (self.stat_steps, self.day);
                     }
                     let t = &mut self.tiles[tile];
                     t.kind = kind;
@@ -527,6 +532,7 @@ impl Game {
         };
         if kind == Kind::Chest {
             self.chest_made[tier.min(4) as usize] += 1;
+            self.tiles[id].born = (self.stat_steps, self.day);
         }
         let loops = self.loops;
         let t = &mut self.tiles[id];

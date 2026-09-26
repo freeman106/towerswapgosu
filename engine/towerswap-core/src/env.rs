@@ -16,6 +16,7 @@
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
 //! 선택 보상: 게임에서 각 등급 상자가 보드에 처음 나타나면 `chest_bonus[등급]`을 더한다(기본 0).
 
+use crate::analysis::Board;
 use crate::game::{ActionResult, Dir, Game, Phase, TileId};
 use crate::items::{DevilOffer, ShopItem};
 use crate::kinds::Kind;
@@ -38,8 +39,8 @@ pub const GENIE_KINDS: [Kind; 5] = [Kind::Wood, Kind::Stone, Kind::Iron, Kind::T
 pub const GRID_H: usize = ROWS + 1;
 pub const GRID_W: usize = COLS;
 const N_KIND: usize = 15;
-const CH_KIND: usize = 0; // 종류 원-핫 15
-const CH_TIER: usize = 15; // 등급 원-핫 0..4
+pub const CH_KIND: usize = 0; // 종류 원-핫 15
+pub const CH_TIER: usize = 15; // 등급 원-핫 0..4
 const CH_WATER: usize = 20;
 const CH_GROUND: usize = 21;
 const CH_SLOT: usize = 22;
@@ -84,7 +85,7 @@ const INPUT_PHASES: [Phase; 11] = [
     Phase::FairyTarget,
 ];
 
-fn kind_index(k: Kind) -> Option<usize> {
+pub fn kind_index(k: Kind) -> Option<usize> {
     Some(match k {
         Kind::Anvil => 0,
         Kind::Tnt => 1,
@@ -111,7 +112,7 @@ fn cell_action(x: i32, y: i32) -> usize {
 }
 
 #[inline]
-fn grid_index(ch: usize, x: i32, y: i32) -> usize {
+pub fn grid_index(ch: usize, x: i32, y: i32) -> usize {
     (ch * GRID_H + y as usize) * GRID_W + (x - 1) as usize
 }
 
@@ -135,6 +136,11 @@ pub struct Env {
     pub ep_survival: f32,
     pub ep_boss: f32,
     pub ep_chest: f32,
+    /// 통계: 교환 한 번으로 상자 합성이 가능했던 결정 수(입력 대기 상태), 그때 실제로 합성한 수,
+    /// 동시에 보유한 일반 상자의 최대 수
+    pub merge_opps: u32,
+    pub merge_taken: u32,
+    pub max_normal_held: u32,
 }
 
 impl Env {
@@ -155,23 +161,36 @@ impl Env {
             ep_survival: 0.0,
             ep_boss: 0.0,
             ep_chest: 0.0,
+            merge_opps: 0,
+            merge_taken: 0,
+            max_normal_held: 0,
         };
-        env.chest_seen = env.chest_tiers();
+        let (bits, n) = env.chest_census();
+        env.chest_seen = bits;
+        env.max_normal_held = n[1];
         env
     }
 
-    /// 보드에 있는 상자 등급 (비트 1 << 등급)
-    fn chest_tiers(&self) -> u8 {
+    /// 보드에 있는 상자: (등급 비트 1 << 등급, 등급별 개수)
+    fn chest_census(&self) -> (u8, [u32; 5]) {
         let g = &self.game;
-        let mut bits = 0u8;
+        let (mut bits, mut n) = (0u8, [0u32; 5]);
         for col in &g.grid[1..] {
             for &t in col[1..].iter().flatten() {
                 if g.tiles[t].kind == Kind::Chest {
-                    bits |= 1 << g.tiles[t].tier.min(4);
+                    let tier = g.tiles[t].tier.min(4);
+                    bits |= 1 << tier;
+                    n[tier as usize] += 1;
                 }
             }
         }
-        bits
+        (bits, n)
+    }
+
+    /// 교환 한 번으로 상자 합성이 가능한지 (같은 등급 상자가 3개 이상일 때만 패턴 검사)
+    pub fn chest_merge_available(&self) -> bool {
+        let (_, n) = self.chest_census();
+        n[1..4].iter().any(|&c| c >= 3) && Board::of(&self.game).one_swap_chest_merges() != 0
     }
 
     /// 이 게임에서 만든 가장 높은 상자 등급 (없으면 0)
@@ -273,11 +292,21 @@ impl Env {
     /// 행동 하나를 적용한다. 무효한 행동은 상태를 바꾸지 않고 `None`을 돌려준다.
     pub fn step(&mut self, a: usize) -> Option<StepOut> {
         let (s0, d0, a0) = (self.game.score(), self.game.day, self.game.achievements);
+        let opp = self.game.phase == Phase::Idle && self.chest_merge_available();
+        let merged0: u32 = self.game.chest_made[2..].iter().sum();
+        self.game.stat_steps += 1;
         if !self.apply(a) {
+            self.game.stat_steps -= 1;
             return None;
         }
+        if opp {
+            self.merge_opps += 1;
+            self.merge_taken += (self.game.chest_made[2..].iter().sum::<u32>() > merged0) as u32;
+        }
         self.day_actions += 1;
-        let new = self.chest_tiers() & !self.chest_seen;
+        let (bits, n) = self.chest_census();
+        self.max_normal_held = self.max_normal_held.max(n[1]);
+        let new = bits & !self.chest_seen;
         self.chest_seen |= new;
         let bonus = (1..=4).filter(|&t| new & (1 << t) != 0).map(|t| self.chest_bonus[t]).sum::<f32>();
         self.ep_chest += bonus;
