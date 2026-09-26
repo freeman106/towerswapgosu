@@ -1,7 +1,7 @@
 //! 밤(공격) 단계와 하루 전환. 원본 m7(웨이브), mD(드래곤), ua.update6/shootEnemy(타워),
 //! mL(투사체), mx/m4/mw(하루 전환)를 프레임 단위로 재현한다.
 
-use crate::game::{Game, Phase, TileId};
+use crate::game::{ActionResult, Game, Phase, TileId};
 use crate::jsmath::{angle_to, cos, sin, DEG2RAD};
 use crate::kinds::Kind;
 use crate::level::{COLS, ROWS};
@@ -805,6 +805,16 @@ impl Game {
         }
         self.phase = Phase::Fall;
         self.advance();
+    }
+
+    /// 휴식일 "Done": 스왑을 0으로 만들어 밤 직전(Dusk)으로 간다 (원본 `r7 = r6 = 0, m$()`)
+    pub fn day_off_done(&mut self) -> ActionResult {
+        if self.phase != Phase::Idle || !self.closed_day() {
+            return ActionResult::Invalid;
+        }
+        self.swaps = 0;
+        self.after_resolution();
+        ActionResult::Ok
     }
 
     /// 점수 = day + 1000 × 업적
