@@ -50,6 +50,8 @@ def parse_args():
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     p.add_argument("--save-every", type=int, default=50, help="업데이트 단위")
     p.add_argument("--resume", default="", help="이어서 학습할 체크포인트")
+    p.add_argument("--init", default="", help="가중치만 불러올 체크포인트 (예: bc.py 결과). 네트워크 크기도 따른다")
+    p.add_argument("--value-warmup", type=int, default=0, help="처음 이만큼의 업데이트는 가치 함수만 학습한다")
     return p.parse_args()
 
 
@@ -113,7 +115,7 @@ class RunningStd:
     def update(self, rew, days, done, gamma):
         self.ret = self.ret * gamma ** days + rew
         x = self.ret
-        bm, bv, bc = x.mean(), x.var(), len(x)
+        bm, bv, bc = float(x.mean()), float(x.var()), len(x)
         d = bm - self.mean
         tot = self.count + bc
         self.mean += d * bc / tot
@@ -147,7 +149,12 @@ def main():
     days = np.zeros(N, np.float32)
     env.reset(grid, scal, mask)
 
+    init = torch.load(args.init, map_location=dev) if args.init else None
+    if init:
+        args.channels, args.blocks, args.hidden = (init["args"][k] for k in ("channels", "blocks", "hidden"))
     agent = Agent(args.channels, args.blocks, args.hidden).to(dev)
+    if init:
+        agent.load_state_dict(init["agent"])
     opt = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
     start_update, global_step = 1, 0
     if args.resume:
@@ -176,6 +183,9 @@ def main():
     t_start, step0 = time.time(), global_step
     ep_hist = []
     rstd = RunningStd(N)
+    for ck in (init, torch.load(args.resume, map_location="cpu") if args.resume else None):
+        if ck and "rstd" in ck:
+            rstd.mean, rstd.var, rstd.count = ck["rstd"]
     for update in range(start_update, n_updates + 1):
         if args.anneal_lr:
             opt.param_groups[0]["lr"] = args.lr * (1.0 - (update - 1.0) / n_updates)
@@ -236,7 +246,10 @@ def main():
                 pg = torch.max(-a_mb * ratio, -a_mb * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
                 v_loss = 0.5 * ((v - fret[idx]) ** 2).mean()
                 ent = dist.entropy().mean()
-                loss = pg + args.vf_coef * v_loss - args.ent_coef * ent
+                if update <= args.value_warmup:
+                    loss = args.vf_coef * v_loss
+                else:
+                    loss = pg + args.vf_coef * v_loss - args.ent_coef * ent
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
@@ -269,7 +282,8 @@ def main():
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}", flush=True)
         if update % args.save_every == 0 or update == n_updates:
             torch.save({"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,
-                        "global_step": global_step, "args": vars(args)}, os.path.join(run_dir, "agent.pt"))
+                        "global_step": global_step, "args": vars(args), "rstd": (rstd.mean, rstd.var, rstd.count)},
+                       os.path.join(run_dir, "agent.pt"))
 
 
 if __name__ == "__main__":

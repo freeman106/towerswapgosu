@@ -5,6 +5,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use towerswap_core::env::{Env, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
+use towerswap_core::expert::greedy_set;
 
 fn splitmix(s: &mut u64) -> u64 {
     *s = s.wrapping_add(0x9E3779B97F4A7C15);
@@ -19,6 +20,7 @@ struct Slot {
     env: Env,
     rng: u64,
     steps: u64,
+    erng: u64, // 전문가 동점 깨기
 }
 
 impl Slot {
@@ -30,8 +32,8 @@ impl Slot {
     }
 }
 
-/// 끝난 게임 기록: (점수, 도달한 날, 스텝 수, 스텝 상한으로 잘림)
-type Finished = (i64, i32, u64, bool);
+/// 끝난 게임 기록: (점수, 도달한 날, 스텝 수, 스텝 상한으로 잘림, 환경 번호)
+type Finished = (i64, i32, u64, bool, usize);
 
 fn slice_mut<'a, T: numpy::Element, D: numpy::ndarray::Dimension>(
     a: &'a mut numpy::PyReadwriteArray<'_, T, D>,
@@ -66,7 +68,7 @@ impl VecEnv {
         let mut root = seed;
         let slots = (0..n)
             .map(|_| {
-                let mut s = Slot { env: Env::new(1, 1), rng: splitmix(&mut root), steps: 0 };
+                let mut s = Slot { env: Env::new(1, 1), rng: splitmix(&mut root), steps: 0, erng: splitmix(&mut root) };
                 s.new_game();
                 s
             })
@@ -157,7 +159,7 @@ impl VecEnv {
                         let truncated = !o.done && slot.steps >= max_steps;
                         let fin = (o.done || truncated).then(|| {
                             let g = &slot.env.game;
-                            let f = (g.score(), g.day, slot.steps, truncated);
+                            let f = (g.score(), g.day, slot.steps, truncated, i);
                             slot.new_game();
                             f
                         });
@@ -173,7 +175,26 @@ impl VecEnv {
         Ok(())
     }
 
-    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다: [(점수, 날, 스텝, 잘림)]
+    /// 각 게임의 현재 상태에서 greedy 전문가를 계산한다.
+    /// out: int64 [N] 최선 행동 집합에서 무작위로 고른 행동, best: bool [N, A] 최선 행동 집합(동점 전부)
+    fn expert(&mut self, py: Python<'_>, mut out: PyReadwriteArray1<'_, i64>, mut best: PyReadwriteArrayDyn<'_, bool>) -> PyResult<()> {
+        let n = self.slots.len();
+        let o = slice_mut(&mut out, n, "out")?;
+        let b = slice_mut(&mut best, n * N_ACTIONS, "best")?;
+        let (slots, pool) = (&mut self.slots, &self.pool);
+        py.detach(|| {
+            pool.install(|| {
+                slots.par_iter_mut().zip(o.par_iter_mut()).zip(b.par_chunks_mut(N_ACTIONS)).for_each(|((slot, o), b)| {
+                    let mut m = [false; N_ACTIONS];
+                    slot.env.mask(&mut m);
+                    *o = greedy_set(&slot.env, &m, b, &mut slot.erng) as i64;
+                })
+            })
+        });
+        Ok(())
+    }
+
+    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다: [(점수, 날, 스텝, 잘림, 환경 번호)]
     fn pop_finished(&mut self) -> Vec<Finished> {
         std::mem::take(&mut self.finished)
     }
