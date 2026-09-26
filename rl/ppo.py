@@ -42,6 +42,7 @@ def parse_args():
     p.add_argument("--clip", type=float, default=0.2)
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--norm-reward", type=int, default=1, help="할인 누적 보상의 이동 표준편차로 보상을 나눈다")
+    p.add_argument("--chest-bonus", default="", help="등급 1..4 상자를 게임에서 처음 만들 때의 보상, 예: 0.1,0.5,2,5")
     p.add_argument("--vf-coef", type=float, default=0.5)
     p.add_argument("--max-grad-norm", type=float, default=0.5)
     p.add_argument("--channels", type=int, default=32)
@@ -140,7 +141,8 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
 
     N, T = args.num_envs, args.num_steps
-    env = ts.VecEnv(N, seed=args.seed, threads=args.threads)
+    chest_bonus = [float(x) for x in args.chest_bonus.split(",")] if args.chest_bonus else None
+    env = ts.VecEnv(N, seed=args.seed, threads=args.threads, chest_bonus=chest_bonus)
     grid = np.zeros((N, C, H, W), np.float32)
     scal = np.zeros((N, S), np.float32)
     mask = np.zeros((N, A), bool)
@@ -179,7 +181,8 @@ def main():
     log = csv.writer(log_f)
     if start_update == 1:
         log.writerow(["update", "step", "sps", "episodes", "score_mean", "day_mean", "day_max", "bosses_mean",
-                      "pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var"])
+                      "pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var",
+                      "chest_ge2", "chest_ge3", "chest_ge4"])
     t_start, step0 = time.time(), global_step
     ep_hist = []
     rstd = RunningStd(N)
@@ -270,15 +273,19 @@ def main():
         if fin:
             sc = np.array([f[0] for f in fin])
             dy = np.array([f[1] for f in fin])
-            row = [update, global_step, int(sps), len(fin), sc.mean(), dy.mean(), dy.max(), (sc // 1000).mean()] + st + [ev]
+            ct = np.array([f[5] for f in fin])
+            row = [update, global_step, int(sps), len(fin), sc.mean(), dy.mean(), dy.max(), (sc // 1000).mean()] + st + [ev] + \
+                [(ct >= k).mean() for k in (2, 3, 4)]
         else:
-            row = [update, global_step, int(sps), 0, "", "", "", ""] + st + [ev]
+            row = [update, global_step, int(sps), 0, "", "", "", ""] + st + [ev, "", "", ""]
         log.writerow(row)
         log_f.flush()
         if update % 5 == 0 or update == 1:
             h = np.array([f[1] for f in ep_hist]) if ep_hist else np.zeros(1)
+            ct = np.array([f[5] for f in ep_hist]) if ep_hist else np.zeros(1)
             print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | "
-                  f"최근 {len(ep_hist)}게임 day 평균 {h.mean():.2f} 최대 {h.max()} | "
+                  f"최근 {len(ep_hist)}게임 day 평균 {h.mean():.2f} 최대 {h.max()} "
+                  f"동/은/금 {(ct >= 2).mean():.0%}/{(ct >= 3).mean():.0%}/{(ct >= 4).mean():.0%} | "
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}", flush=True)
         if update % args.save_every == 0 or update == n_updates:
             torch.save({"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,

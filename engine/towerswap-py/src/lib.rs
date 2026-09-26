@@ -21,6 +21,7 @@ struct Slot {
     rng: u64,
     steps: u64,
     erng: u64, // 전문가 동점 깨기
+    chest_bonus: [f32; 5],
 }
 
 impl Slot {
@@ -28,12 +29,13 @@ impl Slot {
         let v = splitmix(&mut self.rng) as u32 | 1; // 시드 0은 허용하지 않는다
         let m = splitmix(&mut self.rng) as u32 | 1;
         self.env = Env::new(v, m);
+        self.env.chest_bonus = self.chest_bonus;
         self.steps = 0;
     }
 }
 
-/// 끝난 게임 기록: (점수, 도달한 날, 스텝 수, 스텝 상한으로 잘림, 환경 번호)
-type Finished = (i64, i32, u64, bool, usize);
+/// 끝난 게임 기록: (점수, 도달한 날, 스텝 수, 스텝 상한으로 잘림, 환경 번호, 만든 최고 상자 등급)
+type Finished = (i64, i32, u64, bool, usize, u8);
 
 fn slice_mut<'a, T: numpy::Element, D: numpy::ndarray::Dimension>(
     a: &'a mut numpy::PyReadwriteArray<'_, T, D>,
@@ -57,10 +59,18 @@ struct VecEnv {
 
 #[pymethods]
 impl VecEnv {
-    /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치)
+    /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치),
+    /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4]
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000))]
-    fn new(n: usize, seed: u64, threads: usize, max_steps: u64) -> PyResult<Self> {
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None))]
+    fn new(n: usize, seed: u64, threads: usize, max_steps: u64, chest_bonus: Option<Vec<f32>>) -> PyResult<Self> {
+        let mut cb = [0.0f32; 5];
+        if let Some(b) = chest_bonus {
+            if b.len() != 4 {
+                return Err(PyValueError::new_err("chest_bonus: 등급 1..4의 값 4개"));
+            }
+            cb[1..].copy_from_slice(&b);
+        }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -68,7 +78,7 @@ impl VecEnv {
         let mut root = seed;
         let slots = (0..n)
             .map(|_| {
-                let mut s = Slot { env: Env::new(1, 1), rng: splitmix(&mut root), steps: 0, erng: splitmix(&mut root) };
+                let mut s = Slot { env: Env::new(1, 1), rng: splitmix(&mut root), steps: 0, erng: splitmix(&mut root), chest_bonus: cb };
                 s.new_game();
                 s
             })
@@ -159,7 +169,7 @@ impl VecEnv {
                         let truncated = !o.done && slot.steps >= max_steps;
                         let fin = (o.done || truncated).then(|| {
                             let g = &slot.env.game;
-                            let f = (g.score(), g.day, slot.steps, truncated, i);
+                            let f = (g.score(), g.day, slot.steps, truncated, i, slot.env.max_chest_tier());
                             slot.new_game();
                             f
                         });
@@ -194,7 +204,7 @@ impl VecEnv {
         Ok(())
     }
 
-    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다: [(점수, 날, 스텝, 잘림, 환경 번호)]
+    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다: [(점수, 날, 스텝, 잘림, 환경 번호, 최고 상자 등급)]
     fn pop_finished(&mut self) -> Vec<Finished> {
         std::mem::take(&mut self.finished)
     }

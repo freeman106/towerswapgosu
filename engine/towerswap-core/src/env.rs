@@ -14,6 +14,7 @@
 //! - TNT·요정 창의 취소는 막는다(상태가 그대로인 행동의 반복을 막는다). 요정은 가능한 이동이 있을 때만 쓸 수 있다.
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
+//! 선택 보상: 게임에서 각 등급 상자가 보드에 처음 나타나면 `chest_bonus[등급]`을 더한다(기본 0).
 
 use crate::game::{ActionResult, Dir, Game, Phase, TileId};
 use crate::items::{DevilOffer, ShopItem};
@@ -127,6 +128,9 @@ pub struct Env {
     flipped_today: Vec<TileId>, // 오늘 방향을 바꾼 대포
     day_actions: u32,           // 오늘 한 행동 수
     day: i32,                   // 위 두 기록의 날
+    /// 등급별 상자 최초 생성 보상 (인덱스 = 등급 1..4)
+    pub chest_bonus: [f32; 5],
+    chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
 }
 
 impl Env {
@@ -137,7 +141,28 @@ impl Env {
     /// 임의의 게임 상태에서 시작한다 (시나리오·검사용)
     pub fn from_game(game: Game) -> Env {
         let day = game.day;
-        Env { game, flipped_today: Vec::new(), day_actions: 0, day }
+        let mut env = Env { game, flipped_today: Vec::new(), day_actions: 0, day, chest_bonus: [0.0; 5], chest_seen: 0 };
+        env.chest_seen = env.chest_tiers();
+        env
+    }
+
+    /// 보드에 있는 상자 등급 (비트 1 << 등급)
+    fn chest_tiers(&self) -> u8 {
+        let g = &self.game;
+        let mut bits = 0u8;
+        for col in &g.grid[1..] {
+            for &t in col[1..].iter().flatten() {
+                if g.tiles[t].kind == Kind::Chest {
+                    bits |= 1 << g.tiles[t].tier.min(4);
+                }
+            }
+        }
+        bits
+    }
+
+    /// 이 게임에서 만든 가장 높은 상자 등급 (없으면 0)
+    pub fn max_chest_tier(&self) -> u8 {
+        (1..=4).rev().find(|&t| self.chest_seen & (1 << t) != 0).unwrap_or(0)
     }
 
     pub fn done(&self) -> bool {
@@ -238,6 +263,9 @@ impl Env {
             return None;
         }
         self.day_actions += 1;
+        let new = self.chest_tiers() & !self.chest_seen;
+        self.chest_seen |= new;
+        let bonus = (1..=4).filter(|&t| new & (1 << t) != 0).map(|t| self.chest_bonus[t]).sum::<f32>();
         let g = &self.game;
         if g.day != self.day {
             self.day = g.day;
@@ -245,7 +273,7 @@ impl Env {
             self.flipped_today.clear();
         }
         Some(StepOut {
-            reward: (g.score() - s0) as f32 / 100.0,
+            reward: (g.score() - s0) as f32 / 100.0 + bonus,
             done: g.phase == Phase::GameOver,
             days: (g.day - d0) as u32,
         })
