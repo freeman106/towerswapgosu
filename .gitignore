@@ -7,3 +7,6 @@ node_modules/
 # 원본 게임 코드는 저장소에 넣지 않는다 (reference/README.md 참고)
 reference/towerswap_v120/*
 !reference/towerswap_v120/game.js.sha256
+
+# Session handoff notes stay local
+docs/HANDOFF.md
