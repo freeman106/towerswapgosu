@@ -32,7 +32,6 @@ pub struct Dragon {
     pub px: f64,
     pub py: f64,
     pub gx: i32,
-    pub gx2: i32,
     pub gy: i32,
     pub health: f64,
     pub health_max: f64,
@@ -82,6 +81,16 @@ fn js_mod(e: f64, a: f64) -> f64 {
     }
 }
 
+/// 조준 격자의 행 범위: gy = GY0..=9 (gy >= 10은 사격 불가)
+const GY0: i32 = -2;
+const NGY: usize = (10 - GY0) as usize;
+const NCELL: usize = COLS * NGY;
+
+#[inline]
+fn target_cell(gx: i32, gy: i32) -> usize {
+    (gx - 1) as usize * NGY + (gy - GY0) as usize
+}
+
 #[derive(Clone, Default)]
 pub struct NightState {
     pub dragons: Vec<Dragon>,
@@ -89,6 +98,24 @@ pub struct NightState {
     pub projectiles: Vec<Projectile>,
     pub a6: Vec<usize>,
     pub ne: i64, // 원본 nE (상태 0,1,2,3,25에서 프레임마다 증가)
+    /// 사격하는 타일: 포탑(1..6열) 다음 타일 목록 순서. 밤 동안 타일은 바뀌지 않는다.
+    towers: Vec<TileId>,
+    /// 프레임마다 만드는 조준 격자: 사격 가능한 드래곤을 칸(열 우선)별로 a4 순서를 유지해 모은다.
+    /// 칸 c의 드래곤은 grid_ids[grid_start[c]..grid_start[c + 1]], 값은 (a4 순번, 드래곤).
+    grid_start: Vec<u32>,
+    grid_ids: Vec<(u32, u32)>,
+    /// 격자 범위 밖(열 1..6, 행 GY0..9 밖)의 사격 가능한 드래곤. 정상 진행에서는 비어 있다.
+    grid_extra: Vec<(u32, u32)>,
+    grid_tmp: Vec<u16>,
+    /// 칸별 감속 (감속 구간 시작 비율, 곱할 값): 얼음벽·빙산 칸. 밤 시작 때 만든다.
+    slow: [[Option<(f64, f64)>; ROWS + 1]; COLS + 1],
+}
+
+/// 드래곤 갱신 결과
+enum DragonUpd {
+    Keep,
+    Remove,
+    GameOver,
 }
 
 impl Game {
@@ -119,7 +146,6 @@ impl Game {
             px: 0.0,
             py: 432.0,
             gx: 0,
-            gx2: 0,
             gy: (432.0f64 / 48.0).floor() as i32 + 1,
             health: 0.0,
             health_max: 0.0,
@@ -151,7 +177,6 @@ impl Game {
                 d.size = 38.0;
                 d.speed = 0.7 * (1.0 + 0.013 * tr);
                 d.gx = gx;
-                d.gx2 = gx;
                 d.px = (gx as f64 - 0.5) * 48.0 + jitter;
             }
             DragonKind::Red => {
@@ -162,7 +187,6 @@ impl Game {
                 d.size = 38.0;
                 d.speed = 0.7 * (1.0 + 0.01 * tr);
                 d.gx = gx;
-                d.gx2 = gx;
                 d.px = (gx as f64 - 0.5) * 48.0 + jitter;
             }
             DragonKind::Mother => {
@@ -176,7 +200,6 @@ impl Game {
                 }
                 d.size = 0.7 * 74.0;
                 d.gx = rw;
-                d.gx2 = rw;
                 d.px = (rw as f64 - 0.5) * 48.0;
             }
         }
@@ -225,7 +248,6 @@ impl Game {
     fn dragon_grid_x_set(&mut self, id: usize) {
         let d = &mut self.night.dragons[id];
         d.gx = ((d.px / 48.0).floor() as i32 + 1).clamp(1, COLS as i32);
-        d.gx2 = d.gx;
     }
 
     /// `speedNowGet`
@@ -235,13 +257,11 @@ impl Game {
             return 0.0;
         }
         let mut e = d.speed;
-        if let Some(t) = self.tile_at(d.gx, d.gy) {
-            let tile = &self.tiles[t];
-            if tile.kind == Kind::IceWall || tile.kind == Kind::Iceberg {
-                let i = if tile.kind == Kind::Iceberg { 0.5 } else { 0.1 };
+        if Self::in_board(d.gx, d.gy) {
+            if let Some((i, m)) = self.night.slow[d.gx as usize][d.gy as usize] {
                 let f = js_mod(d.py / 48.0, 1.0);
                 if f > i && f < i + 0.5 {
-                    e *= 1.0 - (0.42 + 0.12 * tile.tier as f64);
+                    e *= m;
                 }
             }
         }
@@ -282,37 +302,32 @@ impl Game {
         d.size *= 0.6;
     }
 
-    fn remove_dragon(&mut self, id: usize) {
-        self.night.a4.retain(|&d| d != id);
-    }
-
-    /// `damageTheCastle`. 하트가 0이 되면 참(게임 오버)
-    fn damage_castle(&mut self, id: usize) -> bool {
+    /// `damageTheCastle`: 하트가 0이 되면 게임 오버, 아니면 드래곤을 목록에서 뺀다
+    fn damage_castle(&mut self) -> DragonUpd {
         self.hearts -= 1;
         if self.hearts <= 0 {
             self.phase = Phase::GameOver;
-            return true;
+            return DragonUpd::GameOver;
         }
-        self.remove_dragon(id);
-        false
+        DragonUpd::Remove
     }
 
-    /// `mD.prototype.update2`. 게임 오버면 참
-    fn dragon_update(&mut self, id: usize) -> bool {
+    /// `mD.prototype.update2`
+    fn dragon_update(&mut self, id: usize) -> DragonUpd {
         if self.night.dragons[id].is_dead {
             let d = &self.night.dragons[id];
             if d.got_to_castle {
                 if self.loops - d.dead_time > 15 {
-                    return self.damage_castle(id);
+                    return self.damage_castle();
                 }
             } else {
                 let d = &mut self.night.dragons[id];
                 d.py += 0.3 * d.speed;
             }
             if self.loops - self.night.dragons[id].dead_time > 20 {
-                self.remove_dragon(id);
+                return DragonUpd::Remove;
             }
-            return false;
+            return DragonUpd::Keep;
         }
         if self.night.dragons[id].baby_loops > 0.0 {
             let d = &mut self.night.dragons[id];
@@ -337,12 +352,12 @@ impl Game {
             d.got_to_castle = true;
             d.is_dead = true;
             d.dead_time = self.loops;
-            return false;
+            return DragonUpd::Keep;
         }
         if d.kind == DragonKind::Mother && d.py < 0.0 {
             self.dragon_die(id);
         }
-        false
+        DragonUpd::Keep
     }
 
     /// `takeDamage`
@@ -387,11 +402,11 @@ impl Game {
         }
         let tile = &self.tiles[t];
         match tile.kind {
-            Kind::Ballista => tile.gx >= d.gx && tile.gx <= d.gx2,
+            Kind::Ballista => tile.gx == d.gx,
             Kind::Cannon => tile.gy == d.gy,
             Kind::ArrowTower => {
                 let r = if self.is_turret(t) { 2 } else { 1 };
-                tile.gx - r <= d.gx2 && tile.gx + r >= d.gx && r >= (tile.gy - d.gy).abs()
+                r >= (tile.gx - d.gx).abs() && r >= (tile.gy - d.gy).abs()
             }
             _ => false,
         }
@@ -498,22 +513,92 @@ impl Game {
         self.night.a6.push(id);
     }
 
-    /// `ua.prototype.update6` (밤)
-    fn tower_update(&mut self, t: TileId) {
-        if self.tiles[t].reload <= 0.0 && self.tiles[t].kind.weapon().is_some() {
-            let mut best: Option<(usize, f64)> = None;
-            for idx in 0..self.night.a4.len() {
-                let e = self.night.a4[idx];
-                if self.can_shoot(t, e) {
-                    let v = self.shoot_value(t, e);
-                    match best {
-                        None => best = Some((e, v)),
-                        Some((_, bv)) if v > bv => best = Some((e, v)),
-                        _ => {}
-                    }
+    /// 조준 격자를 다시 만든다 (타워 사격 직전, 프레임마다). 칸별 계수 정렬이라 칸 안에서는 a4 순서가 유지된다.
+    fn build_target_grid(&mut self) {
+        const SKIP: u16 = NCELL as u16;
+        let n = &mut self.night;
+        let mut start = [0u32; NCELL + 1];
+        n.grid_extra.clear();
+        n.grid_tmp.clear();
+        for (i, &e) in n.a4.iter().enumerate() {
+            let d = &n.dragons[e];
+            let mut c = SKIP;
+            if !d.is_dead && d.gy < 10 {
+                if (1..=COLS as i32).contains(&d.gx) && d.gy >= GY0 {
+                    c = target_cell(d.gx, d.gy) as u16;
+                    start[c as usize + 1] += 1;
+                } else {
+                    n.grid_extra.push((i as u32, e as u32));
                 }
             }
-            if let Some((e, _)) = best {
+            n.grid_tmp.push(c);
+        }
+        for c in 0..NCELL {
+            start[c + 1] += start[c];
+        }
+        n.grid_ids.resize(start[NCELL] as usize, (0, 0));
+        let mut pos = start;
+        for (i, &c) in n.grid_tmp.iter().enumerate() {
+            if c != SKIP {
+                let c = c as usize;
+                n.grid_ids[pos[c] as usize] = (i as u32, n.a4[i] as u32);
+                pos[c] += 1;
+            }
+        }
+        n.grid_start.clear();
+        n.grid_start.extend_from_slice(&start);
+    }
+
+    /// 후보 중 최고 가치의 드래곤. 원본은 a4를 앞에서부터 훑으며 더 큰 값만 받으므로, 동점이면 a4 순번이 앞선 쪽이다.
+    fn pick_target(&self, t: TileId, cands: &[(u32, u32)], best: &mut Option<(u32, usize, f64)>) {
+        for &(order, e) in cands {
+            let e = e as usize;
+            if self.can_shoot(t, e) {
+                let v = self.shoot_value(t, e);
+                if best.map_or(true, |(bo, _, bv)| v > bv || (v == bv && order < bo)) {
+                    *best = Some((order, e, v));
+                }
+            }
+        }
+    }
+
+    /// 격자 칸 c0..c1(열 우선 번호)의 후보
+    #[inline]
+    fn grid_range(&self, c0: usize, c1: usize) -> &[(u32, u32)] {
+        let s = &self.night.grid_start;
+        &self.night.grid_ids[s[c0] as usize..s[c1] as usize]
+    }
+
+    /// `ua.prototype.update6` (밤). 사거리 안의 격자 칸만 훑는다.
+    fn tower_update(&mut self, t: TileId) {
+        if self.tiles[t].reload <= 0.0 {
+            let (kind, tx, ty) = (self.tiles[t].kind, self.tiles[t].gx, self.tiles[t].gy);
+            let mut best = None;
+            let cols = 1..=COLS as i32;
+            match kind {
+                Kind::Ballista if cols.contains(&tx) => {
+                    let c = target_cell(tx, GY0);
+                    self.pick_target(t, self.grid_range(c, c + NGY), &mut best);
+                }
+                Kind::Cannon if (GY0..10).contains(&ty) => {
+                    for x in cols {
+                        let c = target_cell(x, ty);
+                        self.pick_target(t, self.grid_range(c, c + 1), &mut best);
+                    }
+                }
+                Kind::ArrowTower => {
+                    let r = if self.is_turret(t) { 2 } else { 1 };
+                    let (y0, y1) = ((ty - r).max(GY0), (ty + r).min(9));
+                    if y0 <= y1 {
+                        for x in (tx - r).max(1)..=(tx + r).min(COLS as i32) {
+                            self.pick_target(t, self.grid_range(target_cell(x, y0), target_cell(x, y1) + 1), &mut best);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.pick_target(t, &self.night.grid_extra, &mut best);
+            if let Some((_, e, _)) = best {
                 self.shoot(t, e);
             }
         }
@@ -528,10 +613,6 @@ impl Game {
         let d = &self.night.dragons[e];
         let a = if pr.exploded > 0 { 15.0 } else { 2.0 };
         rects_hit(pr.px - a / 2.0, pr.py - a / 2.0, a, a, d.px - d.size / 3.0, d.py - d.size / 2.0, 0.66 * d.size, d.size)
-    }
-
-    fn remove_projectile(&mut self, p: usize) {
-        self.night.a6.retain(|&x| x != p);
     }
 
     /// `retarget`. 화살이 대상을 못 찾으면 투사체를 지운다(참 반환)
@@ -569,13 +650,12 @@ impl Game {
             self.night.projectiles[p].exploded = 1;
             false
         } else {
-            self.remove_projectile(p);
             true
         }
     }
 
-    /// `mL.prototype.update3`
-    fn proj_update(&mut self, p: usize) {
+    /// `mL.prototype.update3`. 투사체가 목록에 남으면 참
+    fn proj_update(&mut self, p: usize) -> bool {
         if self.night.projectiles[p].exploded > 0 {
             self.night.projectiles[p].exploded += 1;
             if self.night.projectiles[p].exploded == 5 {
@@ -591,18 +671,17 @@ impl Game {
                     }
                 }
             }
-            if self.night.projectiles[p].exploded > 15 {
-                self.remove_projectile(p);
-            }
-            return;
+            return self.night.projectiles[p].exploded <= 15;
         }
         let kind = self.night.projectiles[p].tower_kind;
         if kind != Kind::Cannon {
             if let Some(t) = self.night.projectiles[p].target {
                 if self.night.dragons[t].is_dead {
-                    let deleted = self.proj_retarget(p);
-                    if kind != Kind::Ballista || deleted {
-                        return;
+                    if self.proj_retarget(p) {
+                        return false;
+                    }
+                    if kind != Kind::Ballista {
+                        return true;
                     }
                 }
                 let t = self.night.projectiles[p].target.unwrap();
@@ -625,7 +704,7 @@ impl Game {
                 if kind == Kind::Cannon {
                     self.night.projectiles[p].exploded = 1;
                 } else {
-                    self.remove_projectile(p);
+                    return false;
                 }
             }
         } else if kind != Kind::Ballista {
@@ -641,6 +720,7 @@ impl Game {
                 self.night.projectiles[p].exploded = 1;
             }
         }
+        true
     }
 
     // ───────────────────────── 밤 진행 ─────────────────────────
@@ -663,38 +743,58 @@ impl Game {
             self.end_night();
             return;
         }
+        // 사격하는 타일만 모은다(원본은 모든 타일을 돌지만 무기가 없으면 재장전 값만 줄고, 그 값은 밤이 끝나면 0이 된다).
+        // 상점으로 놓은 포탑은 타일 목록에도 남아 있어 두 번 들어간다(원본과 같음).
+        let mut towers: Vec<TileId> = self.turrets[1..=COLS].iter().flatten().copied().collect();
+        towers.extend(self.ak.iter().copied());
+        towers.retain(|&t| self.tiles[t].kind.weapon().is_some());
+        self.night.towers = towers;
+        for x in 1..=COLS {
+            for y in 1..=ROWS {
+                if let Some(t) = self.grid[x][y] {
+                    let tile = &self.tiles[t];
+                    if tile.kind == Kind::IceWall || tile.kind == Kind::Iceberg {
+                        let i = if tile.kind == Kind::Iceberg { 0.5 } else { 0.1 };
+                        self.night.slow[x][y] = Some((i, 1.0 - (0.42 + 0.12 * tile.tier as f64)));
+                    }
+                }
+            }
+        }
         loop {
             self.night.ne += 1;
             // 1) 포탑, 이어서 타일 목록 순서대로 사격
-            for x in 1..=COLS {
-                if let Some(t) = self.turrets[x] {
-                    self.tower_update(t);
-                }
-            }
-            for i in 0..self.ak.len() {
-                let t = self.ak[i];
+            self.build_target_grid();
+            for i in 0..self.night.towers.len() {
+                let t = self.night.towers[i];
                 self.tower_update(t);
             }
-            // 2) 드래곤 이동 (순회 중 현재 항목 삭제, 끝에 추가 가능)
-            let mut i = 0;
+            // 2) 드래곤 이동. 원본은 순회 중 현재 항목만 지우고 끝에 추가(아기 드래곤)할 수 있다.
+            //    남는 항목을 앞으로 당기고 끝에서 자르면 순서가 같다.
+            let (mut i, mut w) = (0, 0);
             while i < self.night.a4.len() {
                 let d = self.night.a4[i];
-                if self.dragon_update(d) {
-                    return; // 게임 오버
+                match self.dragon_update(d) {
+                    DragonUpd::GameOver => return,
+                    DragonUpd::Remove => {}
+                    DragonUpd::Keep => {
+                        self.night.a4[w] = d;
+                        w += 1;
+                    }
                 }
-                if self.night.a4.get(i) == Some(&d) {
-                    i += 1;
-                }
+                i += 1;
             }
-            // 3) 투사체
-            let mut i = 0;
+            self.night.a4.truncate(w);
+            // 3) 투사체 (같은 방식)
+            let (mut i, mut w) = (0, 0);
             while i < self.night.a6.len() {
                 let p = self.night.a6[i];
-                self.proj_update(p);
-                if self.night.a6.get(i) == Some(&p) {
-                    i += 1;
+                if self.proj_update(p) {
+                    self.night.a6[w] = p;
+                    w += 1;
                 }
+                i += 1;
             }
+            self.night.a6.truncate(w);
             if self.trace_night {
                 let mut line = format!("F{}", self.loops - self.night_start_loops);
                 for &d in &self.night.a4 {
