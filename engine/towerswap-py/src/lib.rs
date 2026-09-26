@@ -3,6 +3,7 @@
 use numpy::{PyReadonlyArray1, PyReadwriteArray1, PyReadwriteArrayDyn};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use rayon::prelude::*;
 use towerswap_core::env::{Env, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
 use towerswap_core::expert::greedy_set;
@@ -34,8 +35,39 @@ impl Slot {
     }
 }
 
-/// 끝난 게임 기록: (점수, 도달한 날, 스텝 수, 스텝 상한으로 잘림, 환경 번호, 만든 최고 상자 등급)
-type Finished = (i64, i32, u64, bool, usize, u8);
+/// 끝난 게임 기록
+struct Finished {
+    score: i64,
+    day: i32,
+    steps: u64,
+    truncated: bool,
+    env: usize,
+    max_chest: u8,
+    r_survival: f32,
+    r_boss: f32,
+    r_chest: f32,
+    made: [u32; 4],   // 등급 1..4 상자 생성 수
+    opened: [u32; 4], // 등급 1..4 상자 개봉 수
+}
+
+impl Finished {
+    fn of(slot: &Slot, env: usize, truncated: bool) -> Finished {
+        let (e, g) = (&slot.env, &slot.env.game);
+        Finished {
+            score: g.score(),
+            day: g.day,
+            steps: slot.steps,
+            truncated,
+            env,
+            max_chest: e.max_chest_tier(),
+            r_survival: e.ep_survival,
+            r_boss: e.ep_boss,
+            r_chest: e.ep_chest,
+            made: g.chest_made[1..].try_into().unwrap(),
+            opened: g.chest_opened[1..].try_into().unwrap(),
+        }
+    }
+}
 
 fn slice_mut<'a, T: numpy::Element, D: numpy::ndarray::Dimension>(
     a: &'a mut numpy::PyReadwriteArray<'_, T, D>,
@@ -168,8 +200,7 @@ impl VecEnv {
                         *dy = o.days as f32;
                         let truncated = !o.done && slot.steps >= max_steps;
                         let fin = (o.done || truncated).then(|| {
-                            let g = &slot.env.game;
-                            let f = (g.score(), g.day, slot.steps, truncated, i, slot.env.max_chest_tier());
+                            let f = Finished::of(slot, i, truncated);
                             slot.new_game();
                             f
                         });
@@ -204,9 +235,28 @@ impl VecEnv {
         Ok(())
     }
 
-    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다: [(점수, 날, 스텝, 잘림, 환경 번호, 최고 상자 등급)]
-    fn pop_finished(&mut self) -> Vec<Finished> {
+    /// 지난 호출 이후 끝난 게임 기록을 꺼낸다. 게임마다 dict:
+    /// score, day, steps, truncated, env, max_chest, r_survival, r_boss, r_chest(보상 성분 합계),
+    /// made, opened(등급 1..4 상자 생성·개봉 수)
+    fn pop_finished<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         std::mem::take(&mut self.finished)
+            .into_iter()
+            .map(|f| {
+                let d = PyDict::new(py);
+                d.set_item("score", f.score)?;
+                d.set_item("day", f.day)?;
+                d.set_item("steps", f.steps)?;
+                d.set_item("truncated", f.truncated)?;
+                d.set_item("env", f.env)?;
+                d.set_item("max_chest", f.max_chest)?;
+                d.set_item("r_survival", f.r_survival)?;
+                d.set_item("r_boss", f.r_boss)?;
+                d.set_item("r_chest", f.r_chest)?;
+                d.set_item("made", f.made.to_vec())?;
+                d.set_item("opened", f.opened.to_vec())?;
+                Ok(d)
+            })
+            .collect()
     }
 
     /// 게임 i의 요약: (day, hearts, swaps, 단계 코드, 점수)

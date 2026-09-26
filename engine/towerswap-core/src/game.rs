@@ -132,6 +132,9 @@ pub struct Game {
     pub day_off_day: i32,  // eU
     pub deals_done: i32,   // t_
     pub deals_declined: i32, // tg
+    /// 통계: 등급별 상자 생성 수(합성·상점·악마 거래), 개봉 수. 게임 규칙에는 영향이 없다
+    pub chest_made: [u32; 5],
+    pub chest_opened: [u32; 5],
     pub combo: i32,        // rg
     pub loops: i64,        // ea.loops 대용 (순서만 의미 있음)
     // 스왑 직후 첫 매치 판정에서 우선하는 타일 (nV, nJ)
@@ -355,6 +358,10 @@ impl Game {
             t.frame = 2;
         }
         t.moved_time = loops;
+        if up == Kind::Chest {
+            let tier = t.tier.min(4) as usize;
+            self.chest_made[tier] += 1;
+        }
     }
 
     /// `removeFromGrid(e)`: 칸에서 빼고 위 타일을 한 칸씩 내린 뒤 맨 위에 새 타일 생성.
@@ -436,6 +443,8 @@ impl Game {
             day_off_day: 0,
             deals_done: 0,
             deals_declined: 0,
+            chest_made: [0; 5],
+            chest_opened: [0; 5],
             combo: 0,
             loops: 0,
             swap_a: None,

@@ -131,6 +131,10 @@ pub struct Env {
     /// 등급별 상자 최초 생성 보상 (인덱스 = 등급 1..4)
     pub chest_bonus: [f32; 5],
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
+    /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
+    pub ep_survival: f32,
+    pub ep_boss: f32,
+    pub ep_chest: f32,
 }
 
 impl Env {
@@ -141,7 +145,17 @@ impl Env {
     /// 임의의 게임 상태에서 시작한다 (시나리오·검사용)
     pub fn from_game(game: Game) -> Env {
         let day = game.day;
-        let mut env = Env { game, flipped_today: Vec::new(), day_actions: 0, day, chest_bonus: [0.0; 5], chest_seen: 0 };
+        let mut env = Env {
+            game,
+            flipped_today: Vec::new(),
+            day_actions: 0,
+            day,
+            chest_bonus: [0.0; 5],
+            chest_seen: 0,
+            ep_survival: 0.0,
+            ep_boss: 0.0,
+            ep_chest: 0.0,
+        };
         env.chest_seen = env.chest_tiers();
         env
     }
@@ -258,7 +272,7 @@ impl Env {
 
     /// 행동 하나를 적용한다. 무효한 행동은 상태를 바꾸지 않고 `None`을 돌려준다.
     pub fn step(&mut self, a: usize) -> Option<StepOut> {
-        let (s0, d0) = (self.game.score(), self.game.day);
+        let (s0, d0, a0) = (self.game.score(), self.game.day, self.game.achievements);
         if !self.apply(a) {
             return None;
         }
@@ -266,6 +280,9 @@ impl Env {
         let new = self.chest_tiers() & !self.chest_seen;
         self.chest_seen |= new;
         let bonus = (1..=4).filter(|&t| new & (1 << t) != 0).map(|t| self.chest_bonus[t]).sum::<f32>();
+        self.ep_chest += bonus;
+        self.ep_survival += (self.game.day - d0) as f32 * 0.01;
+        self.ep_boss += (self.game.achievements - a0) as f32 * 10.0;
         let g = &self.game;
         if g.day != self.day {
             self.day = g.day;

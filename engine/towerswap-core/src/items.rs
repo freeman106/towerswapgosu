@@ -155,6 +155,7 @@ impl Game {
     /// `treasureChestOpen`
     fn open_chest(&mut self, t: TileId) {
         let tier = self.tiles[t].tier;
+        self.chest_opened[tier.min(4) as usize] += 1;
         if tier > 0 {
             self.add_swaps(chest_swaps(tier));
         }
@@ -360,6 +361,9 @@ impl Game {
                     self.set_grid(x, y, Some(id));
                 }
                 DevilOffer::Place { kind, tier, tile } => {
+                    if kind == Kind::Chest {
+                        self.chest_made[tier.min(4) as usize] += 1;
+                    }
                     let t = &mut self.tiles[tile];
                     t.kind = kind;
                     t.frame = 1;
@@ -521,6 +525,9 @@ impl Game {
                 s
             }
         };
+        if kind == Kind::Chest {
+            self.chest_made[tier.min(4) as usize] += 1;
+        }
         let loops = self.loops;
         let t = &mut self.tiles[id];
         t.moved_time = loops;

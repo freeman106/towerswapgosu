@@ -129,6 +129,37 @@ class RunningStd:
         return float(np.sqrt(self.var + 1e-8))
 
 
+SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest",
+                "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
+                "chest_ge2", "chest_ge3", "chest_ge4"]
+
+
+def episode_summary(fin):
+    """끝난 게임 기록(VecEnv.pop_finished의 dict 목록)의 게임당 평균.
+    보상 성분 합계(생존·보스·상자 보너스)와 등급 1..4 상자 생성·개봉 수, 동·은·금 도달 비율."""
+    if not fin:
+        return None
+    col = lambda k: np.array([f[k] for f in fin], dtype=np.float64)
+    made, opened, mc = np.array([f["made"] for f in fin]), np.array([f["opened"] for f in fin]), col("max_chest")
+    s = {"episodes": len(fin), "score": col("score").mean(), "day": col("day").mean(), "day_max": col("day").max(),
+         "bosses": (col("score") // 1000).mean(), "r_survival": col("r_survival").mean(), "r_boss": col("r_boss").mean(),
+         "r_chest": col("r_chest").mean()}
+    for t in range(4):
+        s[f"made{t + 1}"], s[f"opened{t + 1}"] = made[:, t].mean(), opened[:, t].mean()
+    for k in (2, 3, 4):
+        s[f"chest_ge{k}"] = (mc >= k).mean()
+    return s
+
+
+def format_summary(s):
+    if s is None:
+        return "끝난 게임 없음"
+    return (f"게임 {s['episodes']} 점수 {s['score']:.0f} day {s['day']:.2f}(최대 {s['day_max']:.0f}) | "
+            f"보상 생존 {s['r_survival']:.3f} 보스 {s['r_boss']:.2f} 상자 {s['r_chest']:.2f} | "
+            f"상자 생성 {s['made1']:.2f}/{s['made2']:.2f}/{s['made3']:.2f}/{s['made4']:.2f} "
+            f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f}")
+
+
 def masked_dist(logits, mask):
     return torch.distributions.Categorical(logits=logits.masked_fill(~mask, -1e9))
 
@@ -180,9 +211,8 @@ def main():
     log_f = open(os.path.join(run_dir, "log.csv"), "a", newline="")
     log = csv.writer(log_f)
     if start_update == 1:
-        log.writerow(["update", "step", "sps", "episodes", "score_mean", "day_mean", "day_max", "bosses_mean",
-                      "pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var",
-                      "chest_ge2", "chest_ge3", "chest_ge4"])
+        log.writerow(["update", "step", "sps"] + SUMMARY_KEYS +
+                     ["pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var"])
     t_start, step0 = time.time(), global_step
     ep_hist = []
     rstd = RunningStd(N)
@@ -270,22 +300,12 @@ def main():
         fin = env.pop_finished()
         ep_hist = (ep_hist + fin)[-2000:]
         sps = (global_step - step0) / (time.time() - t_start)
-        if fin:
-            sc = np.array([f[0] for f in fin])
-            dy = np.array([f[1] for f in fin])
-            ct = np.array([f[5] for f in fin])
-            row = [update, global_step, int(sps), len(fin), sc.mean(), dy.mean(), dy.max(), (sc // 1000).mean()] + st + [ev] + \
-                [(ct >= k).mean() for k in (2, 3, 4)]
-        else:
-            row = [update, global_step, int(sps), 0, "", "", "", ""] + st + [ev, "", "", ""]
-        log.writerow(row)
+        s = episode_summary(fin)
+        log.writerow([update, global_step, int(sps)] + [s[k] if s else "" for k in SUMMARY_KEYS] + st + [ev])
         log_f.flush()
         if update % 5 == 0 or update == 1:
-            h = np.array([f[1] for f in ep_hist]) if ep_hist else np.zeros(1)
-            ct = np.array([f[5] for f in ep_hist]) if ep_hist else np.zeros(1)
-            print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | "
-                  f"최근 {len(ep_hist)}게임 day 평균 {h.mean():.2f} 최대 {h.max()} "
-                  f"동/은/금 {(ct >= 2).mean():.0%}/{(ct >= 3).mean():.0%}/{(ct >= 4).mean():.0%} | "
+            print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 최근 "
+                  f"{format_summary(episode_summary(ep_hist))} | "
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}", flush=True)
         if update % args.save_every == 0 or update == n_updates:
             torch.save({"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,

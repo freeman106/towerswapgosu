@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 import towerswap as ts
-from ppo import A, C, H, S, W, Agent, masked_dist
+from ppo import A, C, H, S, W, Agent, episode_summary, format_summary, masked_dist
 
 
 def main():
@@ -45,12 +45,13 @@ def main():
                 act = masked_dist(logits, m).sample()
         env.step(act.cpu().numpy(), grid, scal, mask, rew, done, days)
         for f in env.pop_finished():
-            if len(per[f[4]]) < k:
-                per[f[4]].append(f)
+            if len(per[f["env"]]) < k:
+                per[f["env"]].append(f)
     fin = [f for x in per for f in x]
-    sc, dy = np.array([f[0] for f in fin]), np.array([f[1] for f in fin])
-    print(f"{args.ckpt} ({args.mode}): 게임 {len(fin)} · 점수 평균 {sc.mean():.1f} · day 평균 {dy.mean():.2f} "
-          f"(중앙 {int(np.median(dy))}, 최대 {dy.max()}) · 보스 통과 평균 {(sc // 1000).mean():.2f}")
+    dy = np.array([f["day"] for f in fin])
+    s = episode_summary(fin)
+    print(f"{args.ckpt} ({args.mode}): {format_summary(s)} | day 중앙 {int(np.median(dy))} · 보스 통과 평균 {s['bosses']:.2f} · "
+          f"동/은/금 도달 {s['chest_ge2']:.0%}/{s['chest_ge3']:.0%}/{s['chest_ge4']:.0%}")
 
 
 if __name__ == "__main__":

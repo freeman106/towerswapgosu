@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 import towerswap as ts
-from ppo import A, C, H, S, W, Agent, RunningStd, masked_dist
+from ppo import A, C, H, S, SUMMARY_KEYS, W, Agent, RunningStd, episode_summary, format_summary, masked_dist
 
 
 def parse_args():
@@ -79,7 +79,7 @@ def main():
     n_iters = args.total_steps // (N * T)
     log_f = open(os.path.join(run_dir, "log.csv"), "w", newline="")
     log = csv.writer(log_f)
-    log.writerow(["iter", "step", "sps", "beta", "ce", "acc", "v_loss", "episodes", "score_mean", "day_mean", "day_max"])
+    log.writerow(["iter", "step", "sps", "beta", "ce", "acc", "v_loss"] + SUMMARY_KEYS)
     t0, global_step, ep_hist = time.time(), 0, []
     for it in range(1, n_iters + 1):
         beta = max(0.0, 1.0 - global_step / (args.beta_frac * args.total_steps))
@@ -141,17 +141,12 @@ def main():
         fin = env.pop_finished()
         ep_hist = (ep_hist + fin)[-1000:]
         sps = global_step / (time.time() - t0)
-        if fin:
-            sc, dy = np.array([f[0] for f in fin]), np.array([f[1] for f in fin])
-            log.writerow([it, global_step, int(sps), beta, ce, acc, vl, len(fin), sc.mean(), dy.mean(), dy.max()])
-        else:
-            log.writerow([it, global_step, int(sps), beta, ce, acc, vl, 0, "", "", ""])
+        s = episode_summary(fin)
+        log.writerow([it, global_step, int(sps), beta, ce, acc, vl] + [s[k] if s else "" for k in SUMMARY_KEYS])
         log_f.flush()
         if it % 10 == 0 or it == 1:
-            h = np.array([f[1] for f in ep_hist]) if ep_hist else np.zeros(1)
-            sc = np.array([f[0] for f in ep_hist]) if ep_hist else np.zeros(1)
             print(f"[{it}/{n_iters}] step {global_step:,} sps {sps:,.0f} β {beta:.2f} | ce {ce:.3f} acc {acc:.3f} v {vl:.3f} | "
-                  f"최근 {len(ep_hist)}게임 점수 {sc.mean():.0f} day 평균 {h.mean():.2f} 최대 {h.max()}", flush=True)
+                  f"최근 {format_summary(episode_summary(ep_hist))}", flush=True)
         if it % args.save_every == 0 or it == n_iters:
             torch.save({"agent": agent.state_dict(), "args": vars(args),
                         "rstd": (rstd.mean, rstd.var, rstd.count)}, os.path.join(run_dir, "agent.pt"))

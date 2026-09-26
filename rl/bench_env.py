@@ -29,6 +29,6 @@ while time.perf_counter() - t0 < secs:
     steps += n
 el = time.perf_counter() - t0
 fin = env.pop_finished()
-days_avg = np.mean([f[1] for f in fin]) if fin else 0
+days_avg = np.mean([f["day"] for f in fin]) if fin else 0
 print(f"envs={n} threads={threads or 'all'}: {steps / el:,.0f} steps/s (env만 {steps / t_env:,.0f}/s), "
       f"끝난 게임 {len(fin)}개, 평균 도달 day {days_avg:.1f}")
