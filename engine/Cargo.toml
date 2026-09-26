@@ -1,0 +1,7 @@
+[workspace]
+members = ["towerswap-core", "towerswap-cli"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+debug = false

@@ -1,0 +1,8 @@
+[package]
+name = "towerswap-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+towerswap-core = { path = "../towerswap-core" }
+serde_json = "1"
