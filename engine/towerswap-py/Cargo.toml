@@ -1,0 +1,14 @@
+[package]
+name = "towerswap-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "towerswap"
+crate-type = ["cdylib"]
+
+[dependencies]
+towerswap-core = { path = "../towerswap-core" }
+pyo3 = { version = "0.29", features = ["extension-module"] }
+numpy = "0.29"
+rayon = "1"

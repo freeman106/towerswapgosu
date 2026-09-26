@@ -10,3 +10,6 @@ reference/towerswap_v120/*
 
 # Session handoff notes stay local
 docs/HANDOFF.md
+
+# Training outputs
+rl/runs/

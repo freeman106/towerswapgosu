@@ -1,5 +1,5 @@
 [workspace]
-members = ["towerswap-core", "towerswap-cli"]
+members = ["towerswap-core", "towerswap-cli", "towerswap-py"]
 resolver = "2"
 
 [profile.release]
