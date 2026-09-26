@@ -1,5 +1,7 @@
 [workspace]
 members = ["towerswap-core", "towerswap-cli", "towerswap-py"]
+# 파이썬 확장은 maturin으로 빌드한다 (cd towerswap-py && maturin develop --release)
+default-members = ["towerswap-core", "towerswap-cli"]
 resolver = "2"
 
 [profile.release]
