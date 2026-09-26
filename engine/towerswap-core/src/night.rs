@@ -829,6 +829,7 @@ impl Game {
     /// 밤 종료 → day+1 → `mx()` → `m4()` → `mw()`
     fn end_night(&mut self) {
         self.ne_base = self.night.ne + 1000;
+        self.compact_tiles();
         self.day += 1;
         // mx: 보스 날이면 보스 열
         if self.day == self.goal_next() {

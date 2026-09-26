@@ -2,7 +2,7 @@
 //! 상태 전환)을 그대로 따른다. 주석의 `이름()`은 원본의 난독화된 함수명이다.
 
 use crate::kinds::{Kind, ALL_KINDS};
-use crate::items::Pending;
+use crate::items::{DevilOffer, Pending};
 use crate::night::NightState;
 use crate::level::{first_level_terrain, Terrain, COLS, ROWS};
 use crate::rng::JsRng;
@@ -235,6 +235,79 @@ impl Game {
         if self.tiles[id].alive {
             self.tiles[id].alive = false;
             self.ak.retain(|&t| t != id);
+        }
+    }
+
+    /// 목록(ak)·포탑·참조 어디에도 없는 타일을 지우고 번호를 다시 매긴다(남는 타일의 순서는 유지).
+    /// `tiles`는 새 타일마다 커지므로 밤이 끝날 때마다 부른다. 밤 상태는 비운다.
+    pub(crate) fn compact_tiles(&mut self) {
+        const DEAD: usize = usize::MAX;
+        self.night = Default::default();
+        let mut map = vec![DEAD; self.tiles.len()];
+        let mut mark = |t: Option<TileId>| {
+            if let Some(t) = t {
+                map[t] = 0;
+            }
+        };
+        self.ak.iter().for_each(|&t| mark(Some(t)));
+        self.turrets.iter().for_each(|&t| mark(t));
+        self.tiles.iter().for_each(|t| mark(t.match_join));
+        for t in [self.swap_a, self.swap_b, self.opened_chest, self.fairy_in_use] {
+            mark(t);
+        }
+        let p = &self.pending;
+        for t in [p.tnt_source, p.fairy, p.fairy_src] {
+            mark(t);
+        }
+        if let Some((offer, _)) = p.devil {
+            mark(match offer {
+                DevilOffer::Turret { tower, .. } => Some(tower),
+                DevilOffer::Slot { tile } | DevilOffer::Place { tile, .. } => Some(tile),
+                DevilOffer::Iceberg { .. } => None,
+            });
+        }
+        self.compact_with(map);
+    }
+
+    fn compact_with(&mut self, mut map: Vec<usize>) {
+        let mut n = 0;
+        for m in map.iter_mut() {
+            if *m == 0 {
+                *m = n;
+                n += 1;
+            }
+        }
+        let old = std::mem::take(&mut self.tiles);
+        let old_start = std::mem::take(&mut self.start_pos);
+        for (i, t) in old.into_iter().enumerate() {
+            if map[i] != usize::MAX {
+                self.tiles.push(t);
+                if i < old_start.len() {
+                    self.start_pos.push(old_start[i]); // 남는 타일 순서가 같으므로 앞부분이 된다
+                }
+            }
+        }
+        let re = |t: &mut Option<TileId>| {
+            if let Some(v) = t {
+                *v = map[*v];
+            }
+        };
+        self.ak.iter_mut().for_each(|t| *t = map[*t]);
+        self.grid.iter_mut().flatten().for_each(re);
+        self.turrets.iter_mut().for_each(re);
+        self.tiles.iter_mut().for_each(|t| re(&mut t.match_join));
+        for t in [&mut self.swap_a, &mut self.swap_b, &mut self.opened_chest, &mut self.fairy_in_use] {
+            re(t);
+        }
+        let p = &mut self.pending;
+        for t in [&mut p.tnt_source, &mut p.fairy, &mut p.fairy_src] {
+            re(t);
+        }
+        if let Some((offer, _)) = &mut p.devil {
+            match offer {
+                DevilOffer::Turret { tower: t, .. } | DevilOffer::Slot { tile: t } | DevilOffer::Place { tile: t, .. } => *t = map[*t],
+                DevilOffer::Iceberg { .. } => {}
+            }
         }
     }
 
