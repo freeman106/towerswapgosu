@@ -27,13 +27,14 @@ struct Slot {
     steps: u64,
     erng: u64, // 전문가 동점 깨기
     chest_bonus: [f32; 5],
-    practice: bool,           // 지금 게임이 연습 시작 상태에서 시작했는지
+    practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 합성 행동 집합 M(s)
 }
 
 /// 연습 시작 상태. `merge`는 합성이 유리하다고 확인된 경우의 합성 행동 집합 M(s)
 struct Start {
     game: Game,
+    level: u8,
     merge: Option<Vec<bool>>,
 }
 
@@ -43,11 +44,13 @@ impl Slot {
         let v = splitmix(&mut self.rng) as u32 | 1; // 시드 0은 허용하지 않는다
         let m = splitmix(&mut self.rng) as u32 | 1;
         let r = splitmix(&mut self.rng);
-        self.practice = !starts.is_empty() && ((r >> 11) as f64 / (1u64 << 53) as f64) < frac;
+        let practice = !starts.is_empty() && ((r >> 11) as f64 / (1u64 << 53) as f64) < frac;
         self.aux = None;
-        self.env = if self.practice {
+        self.practice = 0;
+        self.env = if practice {
             let st = &starts[(splitmix(&mut self.rng) % starts.len() as u64) as usize];
             self.aux = st.merge.clone();
+            self.practice = st.level;
             let mut g = st.game.clone();
             g.rng_v = JsRng::new(v);
             g.rng_m = JsRng::new(m);
@@ -142,7 +145,7 @@ struct Finished {
     merge_opps: u32,
     merge_taken: u32,
     max_normal_held: u32,
-    practice: bool,
+    practice: u8,
 }
 
 impl Finished {
@@ -218,7 +221,7 @@ impl VecEnv {
                     steps: 0,
                     erng: splitmix(&mut root),
                     chest_bonus: cb,
-                    practice: false,
+                    practice: 0,
                     aux: None,
                 };
                 s.new_game(&[], 0.0);
@@ -231,14 +234,14 @@ impl VecEnv {
     /// 연습 시작 상태 `count`개를 만든다(상자를 모으는 greedy의 실제 게임에서). 기존 풀은 바꾼다.
     /// level 1: 교환 한 번이면 상자 합성, 2: 교환 두 번, 3: 같은 등급 상자 3개 이상, 4: 같은 등급 상자 2개
     /// confirm_samples > 0이면(난이도 1) 상태마다 합성과 상자 개봉을 그날 밤까지 굴려 비교하고(시드 쌍 수),
-    /// 합성이 나쁘지 않은 상태에만 합성 행동 집합 M(s)을 붙인다(보조 손실 대상).
-    #[pyo3(signature = (count, level, seed = 1, confirm_samples = 0))]
-    fn build_start_pool(&mut self, py: Python<'_>, count: usize, level: u32, seed: u64, confirm_samples: u32) -> PyResult<()> {
+    /// 합성이 나쁘지 않은 상태에만 합성 행동 집합 M(s)을 붙인다(보조 손실 대상). append면 기존 풀에 더한다.
+    #[pyo3(signature = (count, level, seed = 1, confirm_samples = 0, append = false))]
+    fn build_start_pool(&mut self, py: Python<'_>, count: usize, level: u32, seed: u64, confirm_samples: u32, append: bool) -> PyResult<()> {
         if !(1..=4).contains(&level) {
             return Err(PyValueError::new_err("level: 1..4"));
         }
         let pool = &self.pool;
-        self.starts = py.detach(|| {
+        let new: Vec<Start> = py.detach(|| {
             pool.install(|| {
                 (0..count)
                     .into_par_iter()
@@ -255,11 +258,15 @@ impl VecEnv {
                                 }
                             }
                         }
-                        Start { game, merge }
+                        Start { game, level: level as u8, merge }
                     })
                     .collect()
             })
         });
+        if !append {
+            self.starts.clear();
+        }
+        self.starts.extend(new);
         Ok(())
     }
 
@@ -437,7 +444,8 @@ impl VecEnv {
     /// 지난 호출 이후 끝난 게임 기록을 꺼낸다. 게임마다 dict:
     /// score, day, steps, truncated, env, max_chest, r_survival, r_boss, r_chest(보상 성분 합계),
     /// made, opened(등급 1..4 상자 생성·개봉 수), hold_steps, hold_days(등급 1..4 개봉한 상자의 보관 기간 합),
-    /// merge_opps, merge_taken(교환 한 번 상자 합성 기회와 실제 합성), max_normal_held, practice(연습 시작 여부)
+    /// merge_opps, merge_taken(교환 한 번 상자 합성 기회와 실제 합성), max_normal_held,
+    /// practice(연습 시작 여부), practice_level(연습 시작 난이도, 정상 시작은 0)
     fn pop_finished<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         std::mem::take(&mut self.finished)
             .into_iter()
@@ -459,7 +467,8 @@ impl VecEnv {
                 d.set_item("merge_opps", f.merge_opps)?;
                 d.set_item("merge_taken", f.merge_taken)?;
                 d.set_item("max_normal_held", f.max_normal_held)?;
-                d.set_item("practice", f.practice)?;
+                d.set_item("practice", f.practice > 0)?;
+                d.set_item("practice_level", f.practice)?;
                 Ok(d)
             })
             .collect()
