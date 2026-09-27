@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 use towerswap_core::analysis::Board;
 use towerswap_core::env::{Env, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
-use towerswap_core::expert::{greedy_set, greedy_set_with, path_not_worse, Params};
+use towerswap_core::expert::{greedy_set, greedy_set_with, invest_not_worse, params, path_not_worse, Params};
 use towerswap_core::kinds::Kind;
 use towerswap_core::rng::JsRng;
 use towerswap_core::{Game, Phase};
@@ -30,13 +30,14 @@ struct Slot {
     practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
+    aux_hold: Option<i32>,    // 보관 연습(5단계) 시작일: 확인 구간(이틀) 동안 매 결정에 투자 greedy의 최선 행동 집합을 붙인다
 }
 
 /// 연습 시작 상태. `merge`는 합성이 유리하다고 확인된 경우의 합성 행동 집합 M(s)
 struct Start {
     game: Game,
     level: u8,
-    merge: Option<Vec<bool>>, // 1단계: 합성 행동 집합, 2단계: 준비 이동 집합 (유리하다고 확인된 경우만)
+    merge: Option<Vec<bool>>, // 1단계: 합성 행동 집합, 2단계: 준비 이동 집합, 5단계: 투자 greedy의 최선 행동 집합 (확인된 경우만)
 }
 
 impl Slot {
@@ -48,11 +49,13 @@ impl Slot {
         let practice = !starts.is_empty() && ((r >> 11) as f64 / (1u64 << 53) as f64) < frac;
         self.aux = None;
         self.aux_prep = false;
+        self.aux_hold = None;
         self.practice = 0;
         self.env = if practice {
             let st = &starts[(splitmix(&mut self.rng) % starts.len() as u64) as usize];
             self.aux = st.merge.clone();
             self.aux_prep = st.merge.is_some() && st.level == 2;
+            self.aux_hold = (st.merge.is_some() && st.level == 5).then_some(st.game.day);
             self.practice = st.level;
             let mut g = st.game.clone();
             g.rng_v = JsRng::new(v);
@@ -142,15 +145,47 @@ fn open_instead(env: &Env, path: &[usize]) -> Option<usize> {
     })
 }
 
-/// 상자를 모으는 greedy로 게임을 두어 조건 `level`에 맞는 상태를 하나 찾는다
+/// 보관 연습(5단계) 조건: 입력 대기, 스왑 2 이상인 평일, 일반 상자 1~2개, 교환 한 번 합성은 없음
+fn hold_start(g: &Game) -> bool {
+    if g.phase != Phase::Idle || g.swaps < 2 || g.day == g.day_off_day {
+        return false;
+    }
+    let b = Board::of(g);
+    (1..=2).contains(&b.chest_counts()[1]) && b.one_swap_chest_merges() == 0
+}
+
+/// 보관 연습의 대상: 투자 greedy의 최선 행동 집합 (입력 대기 상태에서)
+fn hold_targets(env: &Env, rng: &mut u64) -> Vec<bool> {
+    let (mut m, mut set) = ([false; N_ACTIONS], vec![false; N_ACTIONS]);
+    env.mask(&mut m);
+    greedy_set_with(env, &m, &mut set, rng, &Params::invest());
+    set
+}
+
+/// 일반 상자를 여는 행동 중 첫 번째
+fn open_normal(env: &Env) -> Option<usize> {
+    let g = &env.game;
+    let mut m = [false; N_ACTIONS];
+    env.mask(&mut m);
+    (towerswap_core::env::A_CELL..towerswap_core::env::A_YES).find(|&a| {
+        let c = a - towerswap_core::env::A_CELL;
+        m[a] && g.grid[c % 6 + 1][c / 6].map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier == 1)
+    })
+}
+
+/// 게임을 두어 조건 `level`에 맞는 상태를 하나 찾는다. 1~4단계는 상자를 모으는 greedy,
+/// 5단계(보관 연습)는 기본 greedy(지금 정책처럼 상자를 바로 여는 플레이)의 게임에서 찾는다.
 fn find_start(level: u32, seed: u64) -> Game {
-    let (mut rng, p) = (seed, Params::hoarding());
+    let (mut rng, p) = (seed, if level == 5 { params().clone() } else { Params::hoarding() });
     let (mut m, mut set) = ([false; N_ACTIONS], [false; N_ACTIONS]);
     loop {
         let mut env = Env::new(splitmix(&mut rng) as u32 | 1, splitmix(&mut rng) as u32 | 1);
+        // 5단계는 목표일(1~20일) 이후의 첫 상태를 받아 날짜가 고루 퍼지게 한다
+        let from_day = if level == 5 { 1 + (splitmix(&mut rng) % 20) as i32 } else { 0 };
         while !env.done() && env.game.day < 60 {
             // 맞는 상태를 절반 확률로 받는다(게임 안의 여러 시점이 고루 뽑히도록)
-            if start_level(&env.game) == Some(level) && splitmix(&mut rng) % 2 == 0 {
+            let ok = if level == 5 { env.game.day >= from_day && hold_start(&env.game) } else { start_level(&env.game) == Some(level) };
+            if ok && (level == 5 || splitmix(&mut rng) % 2 == 0) {
                 return env.game.clone();
             }
             env.mask(&mut m);
@@ -264,6 +299,7 @@ impl VecEnv {
                     practice: 0,
                     aux: None,
                     aux_prep: false,
+                    aux_hold: None,
                 };
                 s.new_game(&[], 0.0);
                 s
@@ -272,15 +308,16 @@ impl VecEnv {
         Ok(VecEnv { slots, pool, max_steps, finished: Vec::new(), starts: Vec::new(), start_frac: 0.0 })
     }
 
-    /// 연습 시작 상태 `count`개를 만든다(상자를 모으는 greedy의 실제 게임에서). 기존 풀은 바꾼다.
-    /// level 1: 교환 한 번이면 상자 합성, 2: 교환 두 번, 3: 같은 등급 상자 3개 이상, 4: 같은 등급 상자 2개
+    /// 연습 시작 상태 `count`개를 만든다(실제 게임에서). 기존 풀은 바꾼다.
+    /// level 1: 교환 한 번이면 상자 합성, 2: 교환 두 번, 3: 같은 등급 상자 3개 이상, 4: 같은 등급 상자 2개,
+    /// 5: 보관 연습(기본 greedy 게임에서 일반 상자 1~2개를 가진 평일 낮. 확인은 투자 대 지금 개봉을 밤 2번까지 비교)
     /// confirm_samples > 0이면(난이도 1·2) 상태마다 합성 경로(1단계: 합성, 2단계: 준비 이동 + 합성)와 상자 개봉을
     /// 그날 밤까지 굴려 비교하고(시드 쌍 수), 합성 쪽이 나쁘지 않은 상태에만 보조 손실 대상 M(s)을 붙인다
     /// (1단계: 합성 행동 집합, 2단계: 준비 이동 집합). append면 기존 풀에 더한다.
     #[pyo3(signature = (count, level, seed = 1, confirm_samples = 0, append = false))]
     fn build_start_pool(&mut self, py: Python<'_>, count: usize, level: u32, seed: u64, confirm_samples: u32, append: bool) -> PyResult<()> {
-        if !(1..=4).contains(&level) {
-            return Err(PyValueError::new_err("level: 1..4"));
+        if !(1..=5).contains(&level) {
+            return Err(PyValueError::new_err("level: 1..5"));
         }
         let pool = &self.pool;
         let new: Vec<Start> = py.detach(|| {
@@ -291,6 +328,14 @@ impl VecEnv {
                         let mut rng = splitmix(&mut (seed ^ (i as u64) << 20));
                         let game = find_start(level, rng);
                         let mut merge = None;
+                        if level == 5 && confirm_samples > 0 {
+                            let env = Env::from_game(game.clone());
+                            if let Some(open) = open_normal(&env) {
+                                if invest_not_worse(&env, open, 2, confirm_samples, 1.0, &mut rng) {
+                                    merge = Some(hold_targets(&env, &mut rng));
+                                }
+                            }
+                        }
                         if level <= 2 && confirm_samples > 0 {
                             let env = Env::from_game(game.clone());
                             let (set, path) = if level == 1 {
@@ -443,6 +488,17 @@ impl VecEnv {
                             f
                         });
                         *d = fin.is_some();
+                        // 보관 연습: 확인 구간(시작일과 다음 날), 입력 대기, 1~3등급 상자가 있는 동안 계속 대상을 붙인다
+                        if let Some(day) = slot.aux_hold {
+                            let g = &slot.env.game;
+                            let n = Board::of(g).chest_counts();
+                            let keep = fin.is_none() && g.day < day + 2 && g.day != g.day_off_day && g.phase == Phase::Idle && n[1..4].iter().any(|&c| c > 0);
+                            if keep {
+                                slot.aux = Some(hold_targets(&slot.env, &mut slot.erng));
+                            } else {
+                                slot.aux_hold = None;
+                            }
+                        }
                         if prep_hit && fin.is_none() && slot.env.game.phase == Phase::Idle {
                             let ms = merge_set(&slot.env);
                             if ms.iter().any(|&x| x) {

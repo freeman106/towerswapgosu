@@ -27,6 +27,12 @@ impl Params {
     pub fn hoarding() -> Params {
         Params { swap: 0.2, chest: [0.0, 6.0, 30.0, 140.0, 380.0], treasure: 2.0, dusk_tier: 3, heart: 1.5 }
     }
+
+    /// 투자 모드: 상자를 합성 잠재 가치로 평가해 낮에 일반 상자를 열면 손해가 되고(보관), 합성·새 상자 만들기를 선호한다.
+    /// 밤 직전에는 은상자 이상만 연다. 생존 가중치는 기본값과 같다.
+    pub fn invest() -> Params {
+        Params { swap: 0.2, chest: [0.0, 6.0, 30.0, 140.0, 380.0], treasure: 0.0, dusk_tier: 3, heart: 3.0 }
+    }
 }
 
 pub fn params() -> &'static Params {
@@ -181,9 +187,11 @@ pub fn greedy_action(env: &Env, mask: &[bool], rng: &mut u64) -> usize {
     greedy_set(env, mask, &mut set, rng)
 }
 
-/// 행동열 `path`를 한 뒤 greedy(기본 파라미터)로 그날을 마치고 밤을 넘긴 결과: (죽었는지, 잃은 하트).
+/// 행동열 `path`를 한 뒤 greedy(파라미터 `p`)로 밤을 `nights`번 넘길 때까지 진행한 결과:
+/// (죽었는지, 잃은 하트, 끝에 보드에 남은 상자의 개봉 스왑 합).
 /// 복제본의 난수는 `seeds`로 바꾼다(실제 게임의 미래를 보지 않는다). 행동열 중 무효한 행동이 있으면 None.
-pub fn rollout_night(env: &Env, path: &[usize], seeds: (u32, u32), rng: &mut u64) -> Option<(bool, i32)> {
+pub fn rollout(env: &Env, path: &[usize], p: &Params, nights: i32, seeds: (u32, u32), rng: &mut u64) -> Option<(bool, i32, f64)> {
+    const OPEN: [f64; 5] = [0.0, 2.0, 12.0, 70.0, 380.0];
     let mut e = env.clone();
     e.game.rng_v = JsRng::new(seeds.0);
     e.game.rng_m = JsRng::new(seeds.1);
@@ -194,16 +202,49 @@ pub fn rollout_night(env: &Env, path: &[usize], seeds: (u32, u32), rng: &mut u64
         }
         e.step(a)?;
     }
-    let mut m = [false; N_ACTIONS];
-    for _ in 0..5000 {
-        if e.done() || e.game.day != day {
+    let (mut m, mut set) = ([false; N_ACTIONS], [false; N_ACTIONS]);
+    for _ in 0..20_000 {
+        if e.done() || e.game.day >= day + nights {
             break;
         }
         e.mask(&mut m);
-        let a = greedy_action(&e, &m, rng);
+        let a = greedy_set_with(&e, &m, &mut set, rng, p);
         e.step(a).unwrap();
     }
-    Some((e.done(), hearts - e.game.hearts.max(0)))
+    let g = &e.game;
+    let chests: f64 = g.grid[1..]
+        .iter()
+        .flat_map(|col| col[1..].iter().flatten())
+        .filter(|&&t| g.tiles[t].kind == Kind::Chest)
+        .map(|&t| OPEN[g.tiles[t].tier.min(4) as usize])
+        .sum();
+    Some((e.done(), hearts - g.hearts.max(0), chests))
+}
+
+/// `rollout`을 기본 파라미터로, 그날 밤까지: (죽었는지, 잃은 하트)
+pub fn rollout_night(env: &Env, path: &[usize], seeds: (u32, u32), rng: &mut u64) -> Option<(bool, i32)> {
+    rollout(env, path, params(), 1, seeds, rng).map(|(d, l, _)| (d, l))
+}
+
+/// 투자(보관)가 지금 개봉보다 나쁘지 않은지: 투자 모드로 진행한 경우와 상자 `open`을 연 뒤 기본 greedy로 진행한 경우를
+/// 같은 시드 `samples`쌍으로 밤 `nights`번까지 굴려 비교한다. 투자는 당장의 방어를 조금 양보할 수 있으므로
+/// 사망 수가 많지 않고 평균 잃은 하트가 `heart_slack` 이하로만 많으면 참.
+pub fn invest_not_worse(env: &Env, open: usize, nights: i32, samples: u32, heart_slack: f64, rng: &mut u64) -> bool {
+    let inv = Params::invest();
+    let (mut di, mut dopen, mut li, mut lo) = (0, 0, 0, 0);
+    for _ in 0..samples {
+        let seeds = (lcg(rng) as u32 | 1, lcg(rng) as u32 | 1);
+        let (Some((d1, l1, _)), Some((d2, l2, _))) =
+            (rollout(env, &[], &inv, nights, seeds, rng), rollout(env, &[open], params(), nights, seeds, rng))
+        else {
+            return false;
+        };
+        di += d1 as u32;
+        dopen += d2 as u32;
+        li += l1;
+        lo += l2;
+    }
+    di <= dopen && (li - lo) as f64 / samples as f64 <= heart_slack
 }
 
 /// 행동열 `path`(예: 준비 이동 + 합성)가 상자 개봉 `open`보다 그날 밤 생존에 나쁘지 않은지: 같은 시드 `samples`쌍으로
