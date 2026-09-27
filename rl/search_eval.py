@@ -5,6 +5,7 @@
 두므로 기본 조건과 탐색 조건은 첫 탐색 개입 전까지 똑같다(짝 비교).
 사용: python rl/search_eval.py rl/runs/cb9/agent.pt [--games 32] [--k 3] [--r 2] [--s 4]"""
 import argparse
+import json
 import time
 
 import numpy as np
@@ -38,15 +39,66 @@ class Policy:
         return np.concatenate(lo), np.concatenate(va)
 
 
-def play(pol, n, seed, search, k, r, s, stats, z=0.0):
+DIRS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+GROUP = {"l": "자원", "s": "자원", "i": "자원", "g": "자원", "d": "자원", "t": "타워", "b": "타워", "c": "타워", "w": "타워",
+         "h": "상자", "a": "모루", "I": "빙산", "T": "TNT", "F": "요정", "H": "요정", "C": "대포 자리"}
+
+
+def act_cat(cells, phase, a):
+    """행동 분류 (보드 문자열 기준)"""
+    if a < 168:
+        c = a // 4
+        x, y = c % 6 + 1, c // 6 + 1
+        dx, dy = DIRS[a % 4]
+        src = cells[y - 1][x - 1]
+        tx, ty = x + dx, y + dy
+        if ty == 0:
+            return "돌 성에 넣기" if src[0] == "s" else "화살탑 포탑" if src[0] == "t" else "성 쪽 드래그"
+        dst = cells[ty - 1][tx - 1] if 1 <= ty <= 7 and 1 <= tx <= 6 else "~~"
+        if dst in ("..", "~~"):
+            return "빈칸 이동"
+        g1, g2 = sorted((GROUP.get(src[0], "기타"), GROUP.get(dst[0], "기타")))
+        return f"교환 {g1}-{g2}"
+    if a < 216:
+        c = a - 168
+        x, y = c % 6 + 1, c // 6
+        if phase in (83, 43, 116, 109):
+            return {83: "상인 판매", 43: "아이템 배치", 116: "TNT 폭파", 109: "요정 선택"}[phase]
+        t = cells[y - 1][x - 1] if y >= 1 else ""
+        return {"h": "상자 열기", "c": "대포 방향", "T": "TNT 사용", "F": "요정 사용", "H": "요정 사용"}.get(t[:1], "탭")
+    if a in (216, 217):
+        yes = a == 216
+        return {56: "악마 " + ("수락" if yes else "거절"), 79: "상점 " + ("받기" if yes else "거절"),
+                108: "휴식일 " + ("받기" if yes else "거절"), 109: "요정 취소"}.get(phase, "예" if yes else "아니오")
+    if a < 223:
+        return "지니"
+    if a == 223:
+        return "TNT 전부 폭파"
+    return "밤 시작" if phase == 25 else "휴식일 끝"
+
+
+def board_info(cells, turrets):
+    """타워 점유율(땅 칸 중 타워 칸), 등급별 공격 타워 수"""
+    land = sum(1 for row in cells for c in row if c != "~~")
+    towers = sum(1 for row in cells for c in row if c[:1] in "tbcw" and c)
+    tiers = [0] * 5
+    for c in [c for row in cells for c in row] + list(turrets):
+        if c[:1] in ("t", "b", "c"):
+            tiers[min(max(int(c[1]), 1), 4)] += 1
+    return towers / land, tiers
+
+
+def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None):
+    """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝)"""
     env = ts.VecEnv(n, seed=seed)
     grid = np.zeros((n, C, H, W), np.float32)
     scal = np.zeros((n, S), np.float32)
     mask = np.zeros((n, A), bool)
     rew, done, days = np.zeros(n, np.float32), np.zeros(n, bool), np.zeros(n, np.float32)
     env.reset(grid, scal, mask)
+    nc = 1 + k + r
     if search:
-        m = n * (1 + k + r) * s
+        m = n * nc * s
         se = ts.SearchEnv(m)
         sg = np.zeros((m, C, H, W), np.float32)
         ss = np.zeros((m, S), np.float32)
@@ -55,10 +107,16 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0):
         ret, sdays, dead, lost = np.zeros(m, np.float32), np.zeros(m, np.float32), np.zeros(m, bool), np.zeros(m, np.float32)
     alive = np.ones(n, bool)
     final = np.zeros(n, int)
+    stones = np.zeros(n, int)  # 오늘 돌을 성에 넣은 횟수
     step = 0
+    t_start = time.time()
     while alive.any():
+        if search and step % 50 == 0:
+            print(f"  [탐색] 스텝 {step} · 진행 중 {alive.sum()}판 · {time.time() - t_start:.0f}s", flush=True)
         logits, _ = pol(grid, scal, mask)
         act = (logits + np.random.default_rng([seed, step]).gumbel(size=(n, A))).argmax(1)
+        base_act = act.copy()
+        info = {}  # 게임 → (후보, 후보별 평균 Q, 기본 대비 차이 평균, 표준오차)
         if search:
             # 후보: 기본 행동, 확률 상위 k개, 그 밖의 유효 행동 r개
             rng = np.random.default_rng([seed, step, 11])
@@ -103,6 +161,7 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0):
                     sem = d.std(1, ddof=1) / np.sqrt(s) if s > 1 else np.zeros_like(mean)
                     ok = (mean > 0) & (mean > z * sem)
                     stats["searched"] += 1
+                    info[i] = (cands, qs.mean(1), np.r_[0.0, mean], np.r_[0.0, sem])
                     if ok.any():
                         j = int(np.argmax(np.where(ok, mean, -np.inf)))
                         c = int(cands[1 + j])
@@ -110,9 +169,50 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0):
                         stats["rank"][min(int((logits[i] > logits[i, c]).sum()), 4)] += 1
                         stats["gain"].append(float(mean[j]))
                         act[i] = c
+        if log is not None:
+            for i in np.nonzero(alive)[0]:
+                day, hearts, swaps, phase, _ = env.state(int(i))
+                cells, tur = env.board(int(i))
+                cat = act_cat(cells, phase, int(act[i]))
+                stones[i] += cat == "돌 성에 넣기"
+                if cat == "밤 시작" or cat == "휴식일 끝":
+                    occ, tiers = board_info(cells, tur)
+                    log["dusk"].append({"game": int(i), "day": day, "hearts": hearts, "occ": occ, "tiers": tiers, "stones": int(stones[i])})
+                    stones[i] = 0
+                if i in info:
+                    cands, qm, dm, sd = info[i]
+                    occ, _ = board_info(cells, tur)
+                    ch = int(act[i]) != int(base_act[i])
+                    log["dec"].append({"game": int(i), "day": day, "hearts": hearts, "swaps": swaps, "phase": phase, "occ": occ,
+                                       "base": act_cat(cells, phase, int(base_act[i])), "chosen": cat, "changed": ch,
+                                       "gain": float(dm[list(cands).index(act[i])]) if ch else 0.0,
+                                       "rank": int((logits[i] > logits[i, act[i]]).sum())})
+        if rec is not None:
+            for i in np.nonzero(alive)[0]:
+                rec["game"].append(int(i))
+                rec["grid"].append(grid[i].astype(np.float16))
+                rec["scal"].append(scal[i].astype(np.float16))
+                rec["mask"].append(np.packbits(mask[i]))
+                rec["act"].append(int(act[i]))
+                cands, qm, dm, sd = info.get(i, (np.array([act[i]]), np.zeros(1), np.zeros(1), np.zeros(1)))
+                pad = lambda x, v: np.r_[x, np.full(nc - len(x), v)][:nc]
+                rec["cands"].append(pad(np.asarray(cands, np.int64), -1).astype(np.int16))
+                rec["qmean"].append(pad(qm, np.nan).astype(np.float32))
+                rec["dmean"].append(pad(dm, np.nan).astype(np.float32))
+                rec["dsem"].append(pad(sd, np.nan).astype(np.float32))
+                rec["searched"].append(i in info)
         env.step(act, grid, scal, mask, rew, done, days)
-        for f in env.pop_finished():
-            i = f["env"]
+        fins = {f["env"]: f for f in env.pop_finished()}
+        if rec is not None:
+            for i in np.nonzero(alive)[0]:
+                rec["rew"].append(float(rew[i]))
+                rec["days"].append(float(days[i]))
+                rec["done"].append(bool(done[i]))
+        if log is not None:
+            for i in np.nonzero((days > 0) & alive & ~done)[0]:
+                day, hearts, _, _, _ = env.state(int(i))
+                log["morning"].append({"game": int(i), "day": day, "hearts": hearts})
+        for i, f in fins.items():
             if alive[i]:
                 final[i] = f["day"]
                 alive[i] = False
@@ -135,19 +235,29 @@ def main():
     p.add_argument("--r", type=int, default=2, help="그 밖의 무작위 유효 행동 후보 수")
     p.add_argument("--s", type=int, default=4, help="가상 난수 묶음 수")
     p.add_argument("--z", type=float, default=2.0, help="기본 행동 대비 짝 차이 평균이 z·표준오차보다 클 때만 바꾼다 (0이면 평균만 비교)")
+    p.add_argument("--log", default="", help="분석용 기록(JSON) 경로: 결정·하루 단위 (두 조건 모두)")
+    p.add_argument("--record", default="", help="증류용 기록(npz) 경로: 탐색 조건의 모든 스텝 (관측, 행동, 후보별 Q, 보상)")
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
     pol = Policy(args.ckpt, torch.device(args.device))
-    print(f"σ {pol.sigma:.3f} · γ {pol.gamma} · 후보 기본+상위 {args.k}+무작위 {args.r} · 난수 묶음 {args.s} · z {args.z}")
+    print(f"σ {pol.sigma:.3f} · γ {pol.gamma} · 후보 기본+상위 {args.k}+무작위 {args.r} · 난수 묶음 {args.s} · z {args.z}", flush=True)
 
+    logs = {c: {"dec": [], "dusk": [], "morning": []} for c in ("base", "search")} if args.log else {"base": None, "search": None}
+    rec = {k_: [] for k_ in ("game", "grid", "scal", "mask", "act", "cands", "qmean", "dmean", "dsem", "searched", "rew", "days", "done")} if args.record else None
     t0 = time.time()
-    base = play(pol, args.games, args.seed, False, 0, 0, 0, None)
+    base = play(pol, args.games, args.seed, False, 0, 0, 0, None, log=logs["base"])
     tb = time.time() - t0
     stats = {"searched": 0, "changed": 0, "rank": [0] * 5, "gain": [], "rollout_steps": 0}
     t0 = time.time()
-    srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z)
+    srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z, log=logs["search"], rec=rec)
     ts_ = time.time() - t0
+    if args.log:
+        with open(args.log, "w") as f:
+            json.dump({"final": {"base": base.tolist(), "search": srch.tolist()}, **logs}, f, ensure_ascii=False)
+    if rec is not None:
+        np.savez_compressed(args.record, final=srch, sigma=pol.sigma, gamma=pol.gamma, z=args.z,
+                            **{k_: np.array(v) for k_, v in rec.items()})
     print(summary("기본", base, tb))
     print(summary("탐색", srch, ts_))
     d = srch - base
