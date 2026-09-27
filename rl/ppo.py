@@ -64,6 +64,7 @@ def parse_args():
     p.add_argument("--hidden", type=int, default=256)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     p.add_argument("--save-every", type=int, default=50, help="업데이트 단위")
+    p.add_argument("--keep-every", type=int, default=0, help="이 업데이트마다 체크포인트 사본(agent_<스텝>M.pt)을 남긴다. 0이면 끔")
     p.add_argument("--resume", default="", help="이어서 학습할 체크포인트")
     p.add_argument("--init", default="", help="가중치만 불러올 체크포인트 (예: bc.py 결과). 네트워크 크기도 따른다")
     p.add_argument("--value-warmup", type=int, default=0, help="처음 이만큼의 업데이트는 가치 함수만 학습한다")
@@ -415,10 +416,13 @@ def main():
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}"
                   + (f" | 보조 계수 {aux_c:.3f} 대상 비율 {aux_frac:.4f} 실효 {aux_c * aux_frac:.4f} 대상 확률 {aux_p:.3f}"
                      if args.aux_coef > 0 else ""), flush=True)
-        if update % args.save_every == 0 or update == n_updates:
-            torch.save({"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,
-                        "global_step": global_step, "args": vars(args), "rstd": (rstd.mean, rstd.var, rstd.count)},
-                       os.path.join(run_dir, "agent.pt"))
+        keep = args.keep_every and update % args.keep_every == 0
+        if update % args.save_every == 0 or update == n_updates or keep:
+            ck = {"agent": agent.state_dict(), "opt": opt.state_dict(), "update": update,
+                  "global_step": global_step, "args": vars(args), "rstd": (rstd.mean, rstd.var, rstd.count)}
+            torch.save(ck, os.path.join(run_dir, "agent.pt"))
+            if keep:
+                torch.save(ck, os.path.join(run_dir, f"agent_{round(global_step / 1e6)}M.pt"))
 
 
 if __name__ == "__main__":

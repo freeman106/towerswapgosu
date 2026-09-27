@@ -51,7 +51,9 @@ def main():
     dy = np.array([f["day"] for f in fin])
     s = episode_summary(fin)
     print(f"{args.ckpt} ({args.mode}): {format_summary(s)} | day 중앙 {int(np.median(dy))} · 보스 통과 평균 {s['bosses']:.2f} · "
-          f"동/은/금 도달 {s['chest_ge2']:.0%}/{s['chest_ge3']:.0%}/{s['chest_ge4']:.0%}")
+          f"동/은/금 도달 {s['chest_ge2']:.0%}/{s['chest_ge3']:.0%}/{s['chest_ge4']:.0%} | "
+          f"20일 보스 통과 {np.mean(dy > 20):.1%} · 30/40/50일 도달 {np.mean(dy >= 30):.1%}/{np.mean(dy >= 40):.1%}/{np.mean(dy >= 50):.1%} · "
+          f"30일 보스 통과 {np.mean(dy > 30):.1%}")
 
 
 if __name__ == "__main__":
