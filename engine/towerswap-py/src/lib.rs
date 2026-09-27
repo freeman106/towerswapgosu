@@ -625,9 +625,190 @@ impl VecEnv {
     }
 }
 
+/// 탐색 슬롯 하나: 복제한 게임과 그날 밤이 끝날 때까지의 기록
+struct SearchSlot {
+    env: Env,
+    day0: i32,
+    hearts0: i32,
+    ret: f32,  // 누적 보상
+    days: u32, // 지난 날 수
+    active: bool,
+}
+
+impl SearchSlot {
+    /// 행동 하나를 적용하고, 날이 바뀌었거나 게임이 끝났으면 멈춘다
+    fn apply(&mut self, a: usize) -> Result<(), String> {
+        let phase = self.env.game.phase;
+        let o = self.env.step(a).ok_or_else(|| format!("탐색 슬롯: 무효 행동 {a} (단계 {phase:?})"))?;
+        self.ret += o.reward;
+        self.days += o.days;
+        if o.done || self.env.game.day != self.day0 {
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+/// 추론 시 탐색용 복제 환경: VecEnv의 게임을 슬롯마다 복제해(난수는 새 시드) 첫 행동을 적용하고,
+/// 파이썬이 준 행동으로 그날 밤이 끝날 때까지(날이 바뀌거나 게임이 끝날 때까지) 진행한다. 끝난 슬롯은 멈추고
+/// 관측 배열에는 끝 상태가 남는다(가치 추정용).
+#[pyclass]
+struct SearchEnv {
+    slots: Vec<SearchSlot>,
+    pool: rayon::ThreadPool,
+}
+
+#[pymethods]
+impl SearchEnv {
+    /// m: 슬롯 수, threads: 0이면 CPU 수
+    #[new]
+    #[pyo3(signature = (m, threads = 0))]
+    fn new(m: usize, threads: usize) -> PyResult<Self> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let slots = (0..m)
+            .map(|_| SearchSlot { env: Env::new(1, 1), day0: 0, hearts0: 0, ret: 0.0, days: 0, active: false })
+            .collect();
+        Ok(SearchEnv { slots, pool })
+    }
+
+    /// 앞쪽 k = len(idx)개 슬롯에 src의 게임 idx[j]를 복제하고 난수를 seeds[j]에서 만든 두 시드로 바꾼 뒤 first[j]를 적용한다.
+    /// 나머지 슬롯은 멈춘다. grid [M, C, H, W], scal [M, S], mask [M, A], active [M]를 쓴다.
+    #[allow(clippy::too_many_arguments)]
+    fn fork(
+        &mut self,
+        py: Python<'_>,
+        src: PyRef<'_, VecEnv>,
+        idx: PyReadonlyArray1<'_, i64>,
+        first: PyReadonlyArray1<'_, i64>,
+        seeds: PyReadonlyArray1<'_, u64>,
+        mut grid: PyReadwriteArrayDyn<'_, f32>,
+        mut scal: PyReadwriteArrayDyn<'_, f32>,
+        mut mask: PyReadwriteArrayDyn<'_, bool>,
+        mut active: PyReadwriteArray1<'_, bool>,
+    ) -> PyResult<()> {
+        let m = self.slots.len();
+        let (idx, first, seeds) = (idx.as_slice()?, first.as_slice()?, seeds.as_slice()?);
+        let k = idx.len();
+        if k > m || first.len() != k || seeds.len() != k {
+            return Err(PyValueError::new_err(format!("fork: idx {k}, first {}, seeds {} (슬롯 {m})", first.len(), seeds.len())));
+        }
+        if let Some(&i) = idx.iter().find(|&&i| i < 0 || i as usize >= src.slots.len()) {
+            return Err(PyValueError::new_err(format!("fork: 게임 번호 {i}")));
+        }
+        let g = slice_mut(&mut grid, m * GRID_LEN, "grid")?;
+        let s = slice_mut(&mut scal, m * N_SCALAR, "scal")?;
+        let mk = slice_mut(&mut mask, m * N_ACTIONS, "mask")?;
+        let act = slice_mut(&mut active, m, "active")?;
+        let (slots, pool, src_slots) = (&mut self.slots, &self.pool, &src.slots);
+        let out: Result<(), String> = py.detach(|| {
+            pool.install(|| {
+                slots
+                    .par_iter_mut()
+                    .enumerate()
+                    .zip(g.par_chunks_mut(GRID_LEN))
+                    .zip(s.par_chunks_mut(N_SCALAR))
+                    .zip(mk.par_chunks_mut(N_ACTIONS))
+                    .zip(act.par_iter_mut())
+                    .try_for_each(|(((((j, slot), g), s), mk), act)| {
+                        if j >= k {
+                            slot.active = false;
+                            *act = false;
+                            return Ok(());
+                        }
+                        let mut env = src_slots[idx[j] as usize].env.clone();
+                        let mut r = seeds[j];
+                        env.game.rng_v = JsRng::new(splitmix(&mut r) as u32 | 1);
+                        env.game.rng_m = JsRng::new(splitmix(&mut r) as u32 | 1);
+                        *slot = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: true };
+                        slot.apply(first[j] as usize)?;
+                        slot.env.write_obs(g, s);
+                        slot.env.mask(mk);
+                        *act = slot.active;
+                        Ok(())
+                    })
+            })
+        });
+        out.map_err(PyValueError::new_err)
+    }
+
+    /// 진행 중인 슬롯에만 행동을 적용한다(멈춘 슬롯의 행동은 무시). grid, scal, mask, active를 갱신한다.
+    fn step(
+        &mut self,
+        py: Python<'_>,
+        actions: PyReadonlyArray1<'_, i64>,
+        mut grid: PyReadwriteArrayDyn<'_, f32>,
+        mut scal: PyReadwriteArrayDyn<'_, f32>,
+        mut mask: PyReadwriteArrayDyn<'_, bool>,
+        mut active: PyReadwriteArray1<'_, bool>,
+    ) -> PyResult<()> {
+        let m = self.slots.len();
+        let acts = actions.as_slice()?;
+        if acts.len() != m {
+            return Err(PyValueError::new_err(format!("actions: 길이 {} (기대 {m})", acts.len())));
+        }
+        let g = slice_mut(&mut grid, m * GRID_LEN, "grid")?;
+        let s = slice_mut(&mut scal, m * N_SCALAR, "scal")?;
+        let mk = slice_mut(&mut mask, m * N_ACTIONS, "mask")?;
+        let act = slice_mut(&mut active, m, "active")?;
+        let (slots, pool) = (&mut self.slots, &self.pool);
+        let out: Result<(), String> = py.detach(|| {
+            pool.install(|| {
+                slots
+                    .par_iter_mut()
+                    .zip(g.par_chunks_mut(GRID_LEN))
+                    .zip(s.par_chunks_mut(N_SCALAR))
+                    .zip(mk.par_chunks_mut(N_ACTIONS))
+                    .zip(act.par_iter_mut())
+                    .zip(acts.par_iter())
+                    .try_for_each(|(((((slot, g), s), mk), act), &a)| {
+                        if !slot.active {
+                            *act = false;
+                            return Ok(());
+                        }
+                        slot.apply(a as usize)?;
+                        slot.env.write_obs(g, s);
+                        slot.env.mask(mk);
+                        *act = slot.active;
+                        Ok(())
+                    })
+            })
+        });
+        out.map_err(PyValueError::new_err)
+    }
+
+    /// 슬롯별 결과: 누적 보상, 지난 날 수, 사망 여부, 잃은 하트(사망이면 복제 시점 하트 전부)
+    fn results(
+        &self,
+        mut ret: PyReadwriteArray1<'_, f32>,
+        mut days: PyReadwriteArray1<'_, f32>,
+        mut dead: PyReadwriteArray1<'_, bool>,
+        mut lost: PyReadwriteArray1<'_, f32>,
+    ) -> PyResult<()> {
+        let m = self.slots.len();
+        let (r, d, de, l) = (
+            slice_mut(&mut ret, m, "ret")?,
+            slice_mut(&mut days, m, "days")?,
+            slice_mut(&mut dead, m, "dead")?,
+            slice_mut(&mut lost, m, "lost")?,
+        );
+        for (j, slot) in self.slots.iter().enumerate() {
+            let over = slot.env.game.phase == Phase::GameOver;
+            r[j] = slot.ret;
+            d[j] = slot.days as f32;
+            de[j] = over;
+            l[j] = if over { slot.hearts0 as f32 } else { (slot.hearts0 - slot.env.game.hearts) as f32 };
+        }
+        Ok(())
+    }
+}
+
 #[pymodule]
 fn towerswap(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
+    m.add_class::<SearchEnv>()?;
     m.add("N_ACTIONS", N_ACTIONS)?;
     m.add("N_SCALAR", N_SCALAR)?;
     m.add("GRID_SHAPE", (N_GRID_CH, GRID_H, GRID_W))?;
