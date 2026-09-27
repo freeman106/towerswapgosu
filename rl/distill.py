@@ -69,6 +69,7 @@ def main():
     p.add_argument("--alpha", type=float, default=0.5, help="mix: 바꾼 결정에서 탐색 선택에 줄 확률 비중")
     p.add_argument("--min-gain", type=float, default=0.0, help="mix: 이 이득 이하의 교체는 무시(시작 정책 유지)")
     p.add_argument("--vf-coef", type=float, default=0.5)
+    p.add_argument("--pol-coef", type=float, default=1.0, help="0이면 정책은 그대로 두고 가치망만 학습(정책 쪽 층은 고정)")
     p.add_argument("--val-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
@@ -105,7 +106,10 @@ def main():
     a = ck["args"]
     agent = Agent(a["channels"], a["blocks"], a["hidden"]).to(dev)
     agent.load_state_dict(ck["agent"])
-    opt = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
+    if args.pol_coef == 0:  # 정책 출력 층을 고정: 공유 몸통이 바뀌면 정책도 바뀌므로, 가치 머리만 학습한다
+        for name, prm in agent.named_parameters():
+            prm.requires_grad = name.startswith("value.")
+    opt = torch.optim.Adam([q for q in agent.parameters() if q.requires_grad], lr=args.lr, eps=1e-5)
     ref = Agent(a["channels"], a["blocks"], a["hidden"]).to(dev)  # 시작 정책 π₀ (고정)
     ref.load_state_dict(ck["agent"])
     ref.eval()
@@ -161,7 +165,7 @@ def main():
         tl = []
         for j, g, s, m, t, ret, sr in batches(tr_idx, True):
             pol, vl, hit, _ = losses(g, s, m, t, ret, sr, j)
-            loss = pol + args.vf_coef * vl
+            loss = args.pol_coef * pol + args.vf_coef * vl
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
