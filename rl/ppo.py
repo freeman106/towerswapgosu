@@ -43,6 +43,8 @@ def parse_args():
     p.add_argument("--ent-coef", type=float, default=0.01)
     p.add_argument("--norm-reward", type=int, default=1, help="할인 누적 보상의 이동 표준편차로 보상을 나눈다")
     p.add_argument("--chest-bonus", default="", help="등급 1..4 상자를 게임에서 처음 만들 때의 보상, 예: 0.1,0.5,2,5")
+    p.add_argument("--econ-shaping", type=float, default=0.0,
+                   help="퍼텐셜 기반 경제 조형의 스왑 1개당 가중치 w: Φ = w·(남은 스왑 + 보드 상자의 개봉 스왑), 0이면 끔")
     p.add_argument("--start-level", default="", help="연습 시작 상태의 난이도 목록, 예: 1,2 (1: 교환 한 번이면 상자 합성, 2: 두 번, "
                                                         "3: 같은 등급 상자 3개, 4: 2개). 비우면 없음")
     p.add_argument("--start-pool", type=int, default=4000, help="연습 시작 상태 수 (난이도마다 나눈다)")
@@ -141,7 +143,7 @@ class RunningStd:
         return float(np.sqrt(self.var + 1e-8))
 
 
-SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest",
+SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest", "r_econ",
                 "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
                 "chest_ge2", "chest_ge3", "chest_ge4", "hold1_steps", "hold1_days", "max_held1",
                 "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3"]
@@ -158,7 +160,7 @@ def episode_summary(fin):
     made, opened, mc = np.array([f["made"] for f in fin]), np.array([f["opened"] for f in fin]), col("max_chest")
     s = {"episodes": len(fin), "score": col("score").mean(), "day": col("day").mean(), "day_max": col("day").max(),
          "bosses": (col("score") // 1000).mean(), "r_survival": col("r_survival").mean(), "r_boss": col("r_boss").mean(),
-         "r_chest": col("r_chest").mean()}
+         "r_chest": col("r_chest").mean(), "r_econ": col("r_econ").mean()}
     for t in range(4):
         s[f"made{t + 1}"], s[f"opened{t + 1}"] = made[:, t].mean(), opened[:, t].mean()
     for k in (2, 3, 4):
@@ -209,7 +211,7 @@ def format_summary(s):
     if s is None:
         return "끝난 게임 없음"
     return (f"게임 {s['episodes']} 점수 {s['score']:.0f} day {s['day']:.2f}(최대 {s['day_max']:.0f}) | "
-            f"보상 생존 {s['r_survival']:.3f} 보스 {s['r_boss']:.2f} 상자 {s['r_chest']:.2f} | "
+            f"보상 생존 {s['r_survival']:.3f} 보스 {s['r_boss']:.2f} 상자 {s['r_chest']:.2f} 경제 {s['r_econ']:.2f} | "
             f"상자 생성 {s['made1']:.2f}/{s['made2']:.2f}/{s['made3']:.2f}/{s['made4']:.2f} "
             f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f} | "
             f"일반 보관 {s['hold1_steps']:.1f}행동·{s['hold1_days']:.2f}일, 최대 보유 {s['max_held1']:.2f}, "
@@ -230,7 +232,8 @@ def main():
 
     N, T = args.num_envs, args.num_steps
     chest_bonus = [float(x) for x in args.chest_bonus.split(",")] if args.chest_bonus else None
-    env = ts.VecEnv(N, seed=args.seed, threads=args.threads, chest_bonus=chest_bonus)
+    env = ts.VecEnv(N, seed=args.seed, threads=args.threads, chest_bonus=chest_bonus,
+                    econ_w=args.econ_shaping, econ_gamma=args.gamma)
     levels = [int(x) for x in args.start_level.split(",")] if args.start_level else []
     aux_levels = [int(x) for x in args.aux_levels.split(",")] if args.aux_coef > 0 else []
     if levels:

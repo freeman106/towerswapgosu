@@ -14,11 +14,11 @@ pub fn lcg(s: &mut u64) -> u64 {
 /// 휴리스틱 파라미터. 기본값은 환경변수 TS_EXPERT="swap=0.2,c1=6,..."로 바꿀 수 있다(조정 실험용).
 #[derive(Clone)]
 pub struct Params {
-    swap: f64,       // 스왑 1개의 가치
-    chest: [f64; 5], // 상자 등급별 가치(스왑 단위). 기본은 개봉 스왑(2, 12, 70, 380): 스왑 + 상자 = 경제 가치
-    treasure: f64,   // 보물 1개의 가치(스왑 단위)
-    dusk_tier: u8,   // 밤 직전에 여는 상자의 최소 등급
-    heart: f64,
+    pub(crate) swap: f64,       // 스왑 1개의 가치
+    pub(crate) chest: [f64; 5], // 상자 등급별 가치(스왑 단위). 기본은 개봉 스왑(2, 12, 70, 380): 스왑 + 상자 = 경제 가치
+    pub(crate) treasure: f64,   // 보물 1개의 가치(스왑 단위)
+    pub(crate) dusk_tier: u8,   // 밤 직전에 여는 상자의 최소 등급
+    pub(crate) heart: f64,
 }
 
 impl Params {
@@ -32,6 +32,17 @@ impl Params {
     /// 밤 직전에는 은상자 이상만 연다. 생존 가중치는 기본값과 같다.
     pub fn invest() -> Params {
         Params { swap: 0.2, chest: [0.0, 6.0, 30.0, 140.0, 380.0], treasure: 0.0, dusk_tier: 3, heart: 3.0 }
+    }
+
+    /// 보관형 뒤이음(계획 휴리스틱의 롤아웃용): 상자를 열지 않고(낮에 열면 손해, 밤 직전에도 안 연다) 합성은 이득.
+    /// 등급별 가치가 3·v(k) < v(k+1)을 지켜 금상자 합성까지 이득이다(5, 28, 110, 380).
+    pub fn hold() -> Params {
+        Params { swap: 0.2, chest: [0.0, 5.0, 28.0, 110.0, 380.0], treasure: 0.0, dusk_tier: 5, heart: 3.0 }
+    }
+
+    /// 타워 방어력 + 하트만 (계획 휴리스틱의 평가에서 경제 항목을 따로 계산할 때)
+    pub(crate) fn towers_only() -> Params {
+        Params { swap: 0.0, chest: [0.0; 5], treasure: 0.0, dusk_tier: 1, heart: 3.0 }
     }
 }
 
@@ -90,7 +101,7 @@ pub fn heuristic_with(g: &Game, p: &Params) -> f64 {
 }
 
 /// 전문가가 고려하지 않는 행동: 대포 방향 전환, 요정 사용 (효과가 한 수 앞에 드러나지 않는다)
-fn skipped(g: &Game, a: usize) -> bool {
+pub(crate) fn skipped(g: &Game, a: usize) -> bool {
     if !(A_CELL..A_YES).contains(&a) || !matches!(g.phase, Phase::Idle | Phase::Dusk) {
         return false;
     }

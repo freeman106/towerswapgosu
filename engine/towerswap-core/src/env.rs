@@ -15,10 +15,12 @@
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
 //! 선택 보상: 게임에서 각 등급 상자가 보드에 처음 나타나면 `chest_bonus[등급]`을 더한다(기본 0).
+//! 선택 경제 조형(퍼텐셜 기반): Φ(s) = econ_w × (남은 스왑 + 보드 상자의 개봉 스왑), 보상에 γ^days·Φ(s′) − Φ(s)를 더한다.
+//! 게임 오버 뒤 Φ = 0. γ(`econ_gamma`)는 학습의 하루 할인과 같아야 최적 정책이 바뀌지 않는다(기본 econ_w = 0).
 
 use crate::analysis::Board;
 use crate::game::{ActionResult, Dir, Game, Phase, TileId};
-use crate::items::{DevilOffer, ShopItem};
+use crate::items::{chest_swaps, DevilOffer, ShopItem};
 use crate::kinds::Kind;
 use crate::level::{Terrain, COLS, ROWS};
 
@@ -116,6 +118,11 @@ pub fn grid_index(ch: usize, x: i32, y: i32) -> usize {
     (ch * GRID_H + y as usize) * GRID_W + (x - 1) as usize
 }
 
+/// 경제 가치(스왑 단위): 남은 스왑 + 보드 상자의 개봉 스왑
+fn econ_units(swaps: i64, n: &[u32; 5]) -> f32 {
+    (swaps.max(0) + (1..=4).map(|t| n[t] as i64 * chest_swaps(t as u8)).sum::<i64>()) as f32
+}
+
 pub struct StepOut {
     pub reward: f32,
     pub done: bool,
@@ -131,11 +138,15 @@ pub struct Env {
     day: i32,                   // 위 두 기록의 날
     /// 등급별 상자 최초 생성 보상 (인덱스 = 등급 1..4)
     pub chest_bonus: [f32; 5],
+    /// 경제 조형의 가중치(스왑 1개당)와 하루 할인
+    pub econ_w: f32,
+    pub econ_gamma: f32,
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
     pub ep_boss: f32,
     pub ep_chest: f32,
+    pub ep_econ: f32,
     /// 통계: 교환 한 번으로 상자 합성이 가능했던 결정 수(입력 대기 상태), 그때 실제로 합성한 수,
     /// 동시에 보유한 일반 상자의 최대 수
     pub merge_opps: u32,
@@ -165,10 +176,13 @@ impl Env {
             day_actions: 0,
             day,
             chest_bonus: [0.0; 5],
+            econ_w: 0.0,
+            econ_gamma: 1.0,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
             ep_chest: 0.0,
+            ep_econ: 0.0,
             merge_opps: 0,
             merge_taken: 0,
             max_normal_held: 0,
@@ -307,6 +321,7 @@ impl Env {
     /// 행동 하나를 적용한다. 무효한 행동은 상태를 바꾸지 않고 `None`을 돌려준다.
     pub fn step(&mut self, a: usize) -> Option<StepOut> {
         let (s0, d0, a0) = (self.game.score(), self.game.day, self.game.achievements);
+        let phi0 = if self.econ_w != 0.0 { self.econ_w * econ_units(self.game.swaps, &self.chest_census().1) } else { 0.0 };
         let opp = self.game.phase == Phase::Idle && self.chest_merge_available();
         let merged0: u32 = self.game.chest_made[2..].iter().sum();
         self.game.stat_steps += 1;
@@ -336,6 +351,14 @@ impl Env {
         self.ep_chest += bonus;
         self.ep_survival += (self.game.day - d0) as f32 * 0.01;
         self.ep_boss += (self.game.achievements - a0) as f32 * 10.0;
+        let days = (self.game.day - d0) as u32;
+        let econ = if self.econ_w != 0.0 {
+            let phi1 = if self.game.phase == Phase::GameOver { 0.0 } else { self.econ_w * econ_units(self.game.swaps, &n) };
+            self.econ_gamma.powi(days as i32) * phi1 - phi0
+        } else {
+            0.0
+        };
+        self.ep_econ += econ;
         let g = &self.game;
         if g.day != self.day {
             self.day = g.day;
@@ -343,9 +366,9 @@ impl Env {
             self.flipped_today.clear();
         }
         Some(StepOut {
-            reward: (g.score() - s0) as f32 / 100.0 + bonus,
+            reward: (g.score() - s0) as f32 / 100.0 + bonus + econ,
             done: g.phase == Phase::GameOver,
-            days: (g.day - d0) as u32,
+            days,
         })
     }
 

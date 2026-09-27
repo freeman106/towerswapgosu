@@ -36,7 +36,7 @@ pub struct Pending {
 }
 
 /// `mZ`: 상자 등급별 스왑
-fn chest_swaps(tier: u8) -> i64 {
+pub fn chest_swaps(tier: u8) -> i64 {
     match tier {
         1 => 2,
         2 => 12,

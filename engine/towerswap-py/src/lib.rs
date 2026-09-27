@@ -27,6 +27,7 @@ struct Slot {
     steps: u64,
     erng: u64, // 전문가 동점 깨기
     chest_bonus: [f32; 5],
+    econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
     practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
@@ -66,6 +67,7 @@ impl Slot {
             Env::new(v, m)
         };
         self.env.chest_bonus = self.chest_bonus;
+        (self.env.econ_w, self.env.econ_gamma) = self.econ;
         self.steps = 0;
     }
 }
@@ -206,6 +208,7 @@ struct Finished {
     r_survival: f32,
     r_boss: f32,
     r_chest: f32,
+    r_econ: f32,
     made: [u32; 4],   // 등급 1..4 상자 생성 수
     opened: [u32; 4], // 등급 1..4 상자 개봉 수
     hold: [(u64, u64); 4], // 등급 1..4 개봉한 상자의 보관 기간 합 (행동 수, 날)
@@ -232,6 +235,7 @@ impl Finished {
             r_survival: e.ep_survival,
             r_boss: e.ep_boss,
             r_chest: e.ep_chest,
+            r_econ: e.ep_econ,
             made: g.chest_made[1..].try_into().unwrap(),
             opened: g.chest_opened[1..].try_into().unwrap(),
             hold: g.chest_hold[1..].try_into().unwrap(),
@@ -272,10 +276,19 @@ struct VecEnv {
 #[pymethods]
 impl VecEnv {
     /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치),
-    /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4]
+    /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4],
+    /// econ_w, econ_gamma: 경제 조형 가중치(스왑 1개당, 0이면 끔)와 하루 할인(학습의 γ와 같게)
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None))]
-    fn new(n: usize, seed: u64, threads: usize, max_steps: u64, chest_bonus: Option<Vec<f32>>) -> PyResult<Self> {
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0))]
+    fn new(
+        n: usize,
+        seed: u64,
+        threads: usize,
+        max_steps: u64,
+        chest_bonus: Option<Vec<f32>>,
+        econ_w: f32,
+        econ_gamma: f32,
+    ) -> PyResult<Self> {
         let mut cb = [0.0f32; 5];
         if let Some(b) = chest_bonus {
             if b.len() != 4 {
@@ -296,6 +309,7 @@ impl VecEnv {
                     steps: 0,
                     erng: splitmix(&mut root),
                     chest_bonus: cb,
+                    econ: (econ_w, econ_gamma),
                     practice: 0,
                     aux: None,
                     aux_prep: false,
@@ -558,7 +572,7 @@ impl VecEnv {
     }
 
     /// 지난 호출 이후 끝난 게임 기록을 꺼낸다. 게임마다 dict:
-    /// score, day, steps, truncated, env, max_chest, r_survival, r_boss, r_chest(보상 성분 합계),
+    /// score, day, steps, truncated, env, max_chest, r_survival, r_boss, r_chest, r_econ(보상 성분 합계),
     /// made, opened(등급 1..4 상자 생성·개봉 수), hold_steps, hold_days(등급 1..4 개봉한 상자의 보관 기간 합),
     /// merge_opps, merge_taken(교환 한 번 상자 합성 기회와 실제 합성), max_normal_held,
     /// practice(연습 시작 여부), practice_level(연습 시작 난이도, 정상 시작은 0),
@@ -578,6 +592,7 @@ impl VecEnv {
                 d.set_item("r_survival", f.r_survival)?;
                 d.set_item("r_boss", f.r_boss)?;
                 d.set_item("r_chest", f.r_chest)?;
+                d.set_item("r_econ", f.r_econ)?;
                 d.set_item("made", f.made.to_vec())?;
                 d.set_item("opened", f.opened.to_vec())?;
                 d.set_item("hold_steps", f.hold.iter().map(|h| h.0).collect::<Vec<_>>())?;

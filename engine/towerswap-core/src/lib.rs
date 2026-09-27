@@ -8,6 +8,7 @@ pub mod jsmath;
 pub mod kinds;
 pub mod level;
 pub mod night;
+pub mod planner;
 pub mod rng;
 
 pub use game::{ActionResult, Dir, Game, Phase};

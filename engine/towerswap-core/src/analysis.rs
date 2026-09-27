@@ -88,6 +88,17 @@ impl Board {
         found.then_some(2)
     }
 
+    /// 등급별 합성 거리: (교환 한 번으로 합쳐지는 등급 비트, 두 번 이내로 합쳐지는 등급 비트)
+    pub fn chest_merge_bits(&self) -> (u8, u8) {
+        let d1 = self.one_swap_chest_merges();
+        let mut d2 = d1;
+        self.for_each_swap(|b, _, _| {
+            d2 |= b.one_swap_chest_merges();
+            false
+        });
+        (d1, d2)
+    }
+
     /// 가능한 모든 이웃 교환을 적용한 보드로 f를 부른다. f가 참을 돌려주면 멈춘다.
     fn for_each_swap(&self, mut f: impl FnMut(&Board, (usize, usize), (usize, usize)) -> bool) {
         let mut b = self.clone();
