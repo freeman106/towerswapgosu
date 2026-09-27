@@ -181,15 +181,18 @@ pub fn greedy_action(env: &Env, mask: &[bool], rng: &mut u64) -> usize {
     greedy_set(env, mask, &mut set, rng)
 }
 
-/// 행동 `first`를 한 뒤 greedy(기본 파라미터)로 그날을 마치고 밤을 넘긴 결과: (죽었는지, 잃은 하트).
-/// 복제본의 난수는 `seeds`로 바꾼다(실제 게임의 미래를 보지 않는다).
-pub fn rollout_night(env: &Env, first: usize, seeds: (u32, u32), rng: &mut u64) -> (bool, i32) {
+/// 행동열 `path`를 한 뒤 greedy(기본 파라미터)로 그날을 마치고 밤을 넘긴 결과: (죽었는지, 잃은 하트).
+/// 복제본의 난수는 `seeds`로 바꾼다(실제 게임의 미래를 보지 않는다). 행동열 중 무효한 행동이 있으면 None.
+pub fn rollout_night(env: &Env, path: &[usize], seeds: (u32, u32), rng: &mut u64) -> Option<(bool, i32)> {
     let mut e = env.clone();
     e.game.rng_v = JsRng::new(seeds.0);
     e.game.rng_m = JsRng::new(seeds.1);
     let (day, hearts) = (e.game.day, e.game.hearts);
-    if e.step(first).is_none() {
-        return (false, 0);
+    for &a in path {
+        if e.done() || e.game.day != day {
+            break;
+        }
+        e.step(a)?;
     }
     let mut m = [false; N_ACTIONS];
     for _ in 0..5000 {
@@ -200,21 +203,23 @@ pub fn rollout_night(env: &Env, first: usize, seeds: (u32, u32), rng: &mut u64) 
         let a = greedy_action(&e, &m, rng);
         e.step(a).unwrap();
     }
-    (e.done(), hearts - e.game.hearts.max(0))
+    Some((e.done(), hearts - e.game.hearts.max(0)))
 }
 
-/// 합성 행동 `merge`가 상자 개봉 `open`보다 그날 밤 생존에 나쁘지 않은지: 같은 시드 `samples`쌍으로 비교해
-/// 사망 수가 많지 않고 평균 잃은 하트가 0.5 이상 많지 않으면 참
-pub fn merge_not_worse(env: &Env, merge: usize, open: usize, samples: u32, rng: &mut u64) -> bool {
-    let (mut dm, mut dopen, mut lm, mut lo) = (0, 0, 0, 0);
+/// 행동열 `path`(예: 준비 이동 + 합성)가 상자 개봉 `open`보다 그날 밤 생존에 나쁘지 않은지: 같은 시드 `samples`쌍으로
+/// 비교해 사망 수가 많지 않고 평균 잃은 하트가 0.5 이상 많지 않으면 참.
+/// 그날 밤만 보므로, 방어를 조금 양보하고 나중에 이득을 보는 투자형 행동은 걸러질 수 있다.
+pub fn path_not_worse(env: &Env, path: &[usize], open: usize, samples: u32, rng: &mut u64) -> bool {
+    let (mut dp, mut dopen, mut lp, mut lo) = (0, 0, 0, 0);
     for _ in 0..samples {
         let seeds = (lcg(rng) as u32 | 1, lcg(rng) as u32 | 1);
-        let (d1, l1) = rollout_night(env, merge, seeds, rng);
-        let (d2, l2) = rollout_night(env, open, seeds, rng);
-        dm += d1 as u32;
+        let (Some((d1, l1)), Some((d2, l2))) = (rollout_night(env, path, seeds, rng), rollout_night(env, &[open], seeds, rng)) else {
+            return false;
+        };
+        dp += d1 as u32;
         dopen += d2 as u32;
-        lm += l1;
+        lp += l1;
         lo += l2;
     }
-    dm <= dopen && (lm - lo) as f64 / samples as f64 <= 0.5
+    dp <= dopen && (lp - lo) as f64 / samples as f64 <= 0.5
 }

@@ -7,7 +7,7 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 use towerswap_core::analysis::Board;
 use towerswap_core::env::{Env, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
-use towerswap_core::expert::{greedy_set, greedy_set_with, merge_not_worse, Params};
+use towerswap_core::expert::{greedy_set, greedy_set_with, path_not_worse, Params};
 use towerswap_core::kinds::Kind;
 use towerswap_core::rng::JsRng;
 use towerswap_core::{Game, Phase};
@@ -28,14 +28,15 @@ struct Slot {
     erng: u64, // 전문가 동점 깨기
     chest_bonus: [f32; 5],
     practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
-    aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 합성 행동 집합 M(s)
+    aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
+    aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
 }
 
 /// 연습 시작 상태. `merge`는 합성이 유리하다고 확인된 경우의 합성 행동 집합 M(s)
 struct Start {
     game: Game,
     level: u8,
-    merge: Option<Vec<bool>>,
+    merge: Option<Vec<bool>>, // 1단계: 합성 행동 집합, 2단계: 준비 이동 집합 (유리하다고 확인된 경우만)
 }
 
 impl Slot {
@@ -46,10 +47,12 @@ impl Slot {
         let r = splitmix(&mut self.rng);
         let practice = !starts.is_empty() && ((r >> 11) as f64 / (1u64 << 53) as f64) < frac;
         self.aux = None;
+        self.aux_prep = false;
         self.practice = 0;
         self.env = if practice {
             let st = &starts[(splitmix(&mut self.rng) % starts.len() as u64) as usize];
             self.aux = st.merge.clone();
+            self.aux_prep = st.merge.is_some() && st.level == 2;
             self.practice = st.level;
             let mut g = st.game.clone();
             g.rng_v = JsRng::new(v);
@@ -95,14 +98,43 @@ fn merge_set(env: &Env) -> Vec<bool> {
         .collect()
 }
 
-/// 합성 대신 상자를 여는 행동: 합성되는 등급의 상자 탭 중 첫 번째
-fn open_instead(env: &Env, merge: &[bool]) -> Option<usize> {
+/// 다음 수에 상자 합성이 가능해지는 준비 이동 집합과 경로 예시 (준비 이동, 합성 행동). 엔진으로 확인한다
+fn prep_set(env: &Env) -> (Vec<bool>, Option<(usize, usize)>) {
+    let mut m = [false; N_ACTIONS];
+    env.mask(&mut m);
+    let mut example = None;
+    let set = (0..N_ACTIONS)
+        .map(|a| {
+            if !m[a] {
+                return false;
+            }
+            let mut e = env.clone();
+            e.step(a).unwrap();
+            if e.done() || e.game.day != env.game.day || e.game.phase != Phase::Idle || !e.chest_merge_available() {
+                return false;
+            }
+            let ms = merge_set(&e);
+            match ms.iter().position(|&x| x) {
+                Some(b) => {
+                    example.get_or_insert((a, b));
+                    true
+                }
+                None => false,
+            }
+        })
+        .collect();
+    (set, example)
+}
+
+/// 합성 대신 상자를 여는 행동: 합성 경로 `path`로 합쳐지는 등급의 상자 탭 중 첫 번째
+fn open_instead(env: &Env, path: &[usize]) -> Option<usize> {
     let g = &env.game;
     let mut m = [false; N_ACTIONS];
     env.mask(&mut m);
-    let a = merge.iter().position(|&x| x)?;
     let mut e = env.clone();
-    e.step(a).unwrap();
+    for &a in path {
+        e.step(a)?;
+    }
     let tier = (2..=4).find(|&t| e.game.chest_made[t] > g.chest_made[t])? as u8 - 1;
     (towerswap_core::env::A_CELL..towerswap_core::env::A_YES).find(|&a| {
         let c = a - towerswap_core::env::A_CELL;
@@ -146,6 +178,10 @@ struct Finished {
     merge_taken: u32,
     max_normal_held: u32,
     practice: u8,
+    first_merge: Option<(u32, i32)>,
+    steps_hold2: u32,
+    steps_hold3: u32,
+    max_same_held: u32,
 }
 
 impl Finished {
@@ -168,6 +204,10 @@ impl Finished {
             merge_taken: e.merge_taken,
             max_normal_held: e.max_normal_held,
             practice: slot.practice,
+            first_merge: e.first_merge,
+            steps_hold2: e.steps_hold2,
+            steps_hold3: e.steps_hold3,
+            max_same_held: e.max_same_held,
         }
     }
 }
@@ -223,6 +263,7 @@ impl VecEnv {
                     chest_bonus: cb,
                     practice: 0,
                     aux: None,
+                    aux_prep: false,
                 };
                 s.new_game(&[], 0.0);
                 s
@@ -233,8 +274,9 @@ impl VecEnv {
 
     /// 연습 시작 상태 `count`개를 만든다(상자를 모으는 greedy의 실제 게임에서). 기존 풀은 바꾼다.
     /// level 1: 교환 한 번이면 상자 합성, 2: 교환 두 번, 3: 같은 등급 상자 3개 이상, 4: 같은 등급 상자 2개
-    /// confirm_samples > 0이면(난이도 1) 상태마다 합성과 상자 개봉을 그날 밤까지 굴려 비교하고(시드 쌍 수),
-    /// 합성이 나쁘지 않은 상태에만 합성 행동 집합 M(s)을 붙인다(보조 손실 대상). append면 기존 풀에 더한다.
+    /// confirm_samples > 0이면(난이도 1·2) 상태마다 합성 경로(1단계: 합성, 2단계: 준비 이동 + 합성)와 상자 개봉을
+    /// 그날 밤까지 굴려 비교하고(시드 쌍 수), 합성 쪽이 나쁘지 않은 상태에만 보조 손실 대상 M(s)을 붙인다
+    /// (1단계: 합성 행동 집합, 2단계: 준비 이동 집합). append면 기존 풀에 더한다.
     #[pyo3(signature = (count, level, seed = 1, confirm_samples = 0, append = false))]
     fn build_start_pool(&mut self, py: Python<'_>, count: usize, level: u32, seed: u64, confirm_samples: u32, append: bool) -> PyResult<()> {
         if !(1..=4).contains(&level) {
@@ -249,12 +291,21 @@ impl VecEnv {
                         let mut rng = splitmix(&mut (seed ^ (i as u64) << 20));
                         let game = find_start(level, rng);
                         let mut merge = None;
-                        if level == 1 && confirm_samples > 0 {
+                        if level <= 2 && confirm_samples > 0 {
                             let env = Env::from_game(game.clone());
-                            let m = merge_set(&env);
-                            if let (Some(a), Some(open)) = (m.iter().position(|&x| x), open_instead(&env, &m)) {
-                                if merge_not_worse(&env, a, open, confirm_samples, &mut rng) {
-                                    merge = Some(m);
+                            let (set, path) = if level == 1 {
+                                let m = merge_set(&env);
+                                let p = m.iter().position(|&x| x).map(|a| vec![a]);
+                                (m, p)
+                            } else {
+                                let (m, ex) = prep_set(&env);
+                                (m, ex.map(|(a, b)| vec![a, b]))
+                            };
+                            if let Some(path) = path {
+                                if let Some(open) = open_instead(&env, &path) {
+                                    if path_not_worse(&env, &path, open, confirm_samples, &mut rng) {
+                                        merge = Some(set);
+                                    }
                                 }
                             }
                         }
@@ -377,7 +428,10 @@ impl VecEnv {
                     .zip(acts.par_iter())
                     .map(|((((((((i, slot), g), s), m), r), d), dy), &a)| {
                         let phase = slot.env.game.phase;
+                        // 준비 이동 집합 중 하나를 골랐으면 다음 상태의 합성 행동 집합을 대상으로 붙인다
+                        let prep_hit = slot.aux_prep && slot.aux.as_ref().map_or(false, |m| (a as usize) < N_ACTIONS && m[a as usize]);
                         slot.aux = None;
+                        slot.aux_prep = false;
                         let o = slot.env.step(a as usize).ok_or_else(|| format!("환경 {i}: 무효 행동 {a} (단계 {phase:?})"))?;
                         slot.steps += 1;
                         *r = o.reward;
@@ -389,6 +443,12 @@ impl VecEnv {
                             f
                         });
                         *d = fin.is_some();
+                        if prep_hit && fin.is_none() && slot.env.game.phase == Phase::Idle {
+                            let ms = merge_set(&slot.env);
+                            if ms.iter().any(|&x| x) {
+                                slot.aux = Some(ms);
+                            }
+                        }
                         slot.env.write_obs(g, s);
                         slot.env.mask(m);
                         Ok(fin)
@@ -445,7 +505,9 @@ impl VecEnv {
     /// score, day, steps, truncated, env, max_chest, r_survival, r_boss, r_chest(보상 성분 합계),
     /// made, opened(등급 1..4 상자 생성·개봉 수), hold_steps, hold_days(등급 1..4 개봉한 상자의 보관 기간 합),
     /// merge_opps, merge_taken(교환 한 번 상자 합성 기회와 실제 합성), max_normal_held,
-    /// practice(연습 시작 여부), practice_level(연습 시작 난이도, 정상 시작은 0)
+    /// practice(연습 시작 여부), practice_level(연습 시작 난이도, 정상 시작은 0),
+    /// first_merge_step, first_merge_day(첫 상자 합성까지의 행동 수와 지난 날, 없으면 -1),
+    /// steps_hold2, steps_hold3(같은 등급 상자를 2개·3개 이상 가진 행동 수), max_same_held
     fn pop_finished<'py>(&mut self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         std::mem::take(&mut self.finished)
             .into_iter()
@@ -469,6 +531,11 @@ impl VecEnv {
                 d.set_item("max_normal_held", f.max_normal_held)?;
                 d.set_item("practice", f.practice > 0)?;
                 d.set_item("practice_level", f.practice)?;
+                d.set_item("first_merge_step", f.first_merge.map_or(-1, |x| x.0 as i64))?;
+                d.set_item("first_merge_day", f.first_merge.map_or(-1, |x| x.1 as i64))?;
+                d.set_item("steps_hold2", f.steps_hold2)?;
+                d.set_item("steps_hold3", f.steps_hold3)?;
+                d.set_item("max_same_held", f.max_same_held)?;
                 Ok(d)
             })
             .collect()

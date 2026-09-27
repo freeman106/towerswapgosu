@@ -141,6 +141,14 @@ pub struct Env {
     pub merge_opps: u32,
     pub merge_taken: u32,
     pub max_normal_held: u32,
+    /// 통계: 이 에피소드의 첫 상자 합성 시점 (시작부터 센 행동 수, 시작일부터 지난 날)
+    pub first_merge: Option<(u32, i32)>,
+    /// 통계: 같은 등급 상자(1~3등급)를 2개 이상·3개 이상 동시에 가진 행동 수, 최대 동시 보유 수
+    pub steps_hold2: u32,
+    pub steps_hold3: u32,
+    pub max_same_held: u32,
+    start_day: i32,
+    ep_steps: u32,
 }
 
 impl Env {
@@ -164,10 +172,17 @@ impl Env {
             merge_opps: 0,
             merge_taken: 0,
             max_normal_held: 0,
+            first_merge: None,
+            steps_hold2: 0,
+            steps_hold3: 0,
+            max_same_held: 0,
+            start_day: day,
+            ep_steps: 0,
         };
         let (bits, n) = env.chest_census();
         env.chest_seen = bits;
         env.max_normal_held = n[1];
+        env.max_same_held = n[1..4].iter().copied().max().unwrap_or(0);
         env
     }
 
@@ -299,13 +314,22 @@ impl Env {
             self.game.stat_steps -= 1;
             return None;
         }
+        self.ep_steps += 1;
+        let merged = self.game.chest_made[2..].iter().sum::<u32>() > merged0;
         if opp {
             self.merge_opps += 1;
-            self.merge_taken += (self.game.chest_made[2..].iter().sum::<u32>() > merged0) as u32;
+            self.merge_taken += merged as u32;
+        }
+        if merged && self.first_merge.is_none() {
+            self.first_merge = Some((self.ep_steps, self.game.day - self.start_day));
         }
         self.day_actions += 1;
         let (bits, n) = self.chest_census();
         self.max_normal_held = self.max_normal_held.max(n[1]);
+        let same = n[1..4].iter().copied().max().unwrap_or(0);
+        self.max_same_held = self.max_same_held.max(same);
+        self.steps_hold2 += (same >= 2) as u32;
+        self.steps_hold3 += (same >= 3) as u32;
         let new = bits & !self.chest_seen;
         self.chest_seen |= new;
         let bonus = (1..=4).filter(|&t| new & (1 << t) != 0).map(|t| self.chest_bonus[t]).sum::<f32>();
