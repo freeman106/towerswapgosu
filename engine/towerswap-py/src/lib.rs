@@ -220,6 +220,12 @@ struct Finished {
     steps_hold2: u32,
     steps_hold3: u32,
     max_same_held: u32,
+    dmg: [[f64; 5]; 4],
+    tower_nights: [[u32; 5]; 4],
+    dmg_row: [[f64; 8]; 4],
+    tn_row: [[u32; 8]; 4],
+    made_tw: [[u32; 5]; 5],
+    made_tw_row: [[u32; 8]; 5],
 }
 
 impl Finished {
@@ -247,6 +253,12 @@ impl Finished {
             steps_hold2: e.steps_hold2,
             steps_hold3: e.steps_hold3,
             max_same_held: e.max_same_held,
+            dmg: g.stat_dmg,
+            tower_nights: g.stat_tower_nights,
+            dmg_row: g.stat_dmg_row,
+            tn_row: g.stat_tn_row,
+            made_tw: g.stat_made,
+            made_tw_row: g.stat_made_row,
         }
     }
 }
@@ -607,9 +619,57 @@ impl VecEnv {
                 d.set_item("steps_hold2", f.steps_hold2)?;
                 d.set_item("steps_hold3", f.steps_hold3)?;
                 d.set_item("max_same_held", f.max_same_held)?;
+                d.set_item("dmg", f.dmg.iter().map(|r| r[1..].to_vec()).collect::<Vec<_>>())?;
+                d.set_item("tower_nights", f.tower_nights.iter().map(|r| r[1..].to_vec()).collect::<Vec<_>>())?;
+                d.set_item("dmg_row", f.dmg_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
+                d.set_item("tn_row", f.tn_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
+                d.set_item("made_tiers", f.made_tw.iter().map(|r| r[1..].to_vec()).collect::<Vec<_>>())?;
+                d.set_item("made_rows", f.made_tw_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
                 Ok(d)
             })
             .collect()
+    }
+
+    /// 탐색 환경 슬롯 src[j]의 게임을 게임 dst[j]로 가져온다(되돌린 상태에서 이어 두기용). 연습 시작·보조 대상은 지운다.
+    fn load_from(&mut self, search: PyRef<'_, SearchEnv>, src: PyReadonlyArray1<'_, i64>, dst: PyReadonlyArray1<'_, i64>) -> PyResult<()> {
+        let (src, dst) = (src.as_slice()?, dst.as_slice()?);
+        if src.len() != dst.len() {
+            return Err(PyValueError::new_err("load_from: src, dst 길이가 다르다"));
+        }
+        for (&j, &i) in src.iter().zip(dst) {
+            let (j, i) = (j as usize, i as usize);
+            if j >= search.slots.len() || i >= self.slots.len() {
+                return Err(PyValueError::new_err(format!("load_from: 슬롯 {j} 또는 게임 {i} 범위 밖")));
+            }
+            let slot = &mut self.slots[i];
+            slot.env = search.slots[j].env.clone();
+            slot.env.chest_bonus = slot.chest_bonus;
+            (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
+            slot.steps = 0;
+            slot.practice = 0;
+            slot.aux = None;
+            slot.aux_prep = false;
+            slot.aux_hold = None;
+        }
+        Ok(())
+    }
+
+    /// 지금 상태의 관측과 마스크를 쓴다(게임을 바꾸지 않는다).
+    fn observe(
+        &self,
+        mut grid: PyReadwriteArrayDyn<'_, f32>,
+        mut scal: PyReadwriteArrayDyn<'_, f32>,
+        mut mask: PyReadwriteArrayDyn<'_, bool>,
+    ) -> PyResult<()> {
+        let n = self.slots.len();
+        let g = slice_mut(&mut grid, n * GRID_LEN, "grid")?;
+        let s = slice_mut(&mut scal, n * N_SCALAR, "scal")?;
+        let m = slice_mut(&mut mask, n * N_ACTIONS, "mask")?;
+        for (((slot, g), s), m) in self.slots.iter().zip(g.chunks_mut(GRID_LEN)).zip(s.chunks_mut(N_SCALAR)).zip(m.chunks_mut(N_ACTIONS)) {
+            slot.env.write_obs(g, s);
+            slot.env.mask(m);
+        }
+        Ok(())
     }
 
     /// 게임 i의 요약: (day, hearts, swaps, 단계 코드, 점수)
@@ -622,6 +682,12 @@ impl VecEnv {
     fn board(&self, i: usize) -> (Vec<Vec<String>>, Vec<String>) {
         let g = &self.slots[i].env.game;
         (g.board_cells(), g.turret_cells())
+    }
+
+    /// 게임 i의 지금까지 만들어진 방어물: (종류 5 × 결과 등급 1..4, 종류 5 × 결과 행 0..7), 휴식일 번호
+    fn made(&self, i: usize) -> (Vec<Vec<u32>>, Vec<Vec<u32>>, i32) {
+        let g = &self.slots[i].env.game;
+        (g.stat_made.iter().map(|r| r[1..].to_vec()).collect(), g.stat_made_row.iter().map(|r| r.to_vec()).collect(), g.day_off_day)
     }
 }
 
@@ -674,8 +740,8 @@ impl SearchEnv {
         Ok(SearchEnv { slots, pool })
     }
 
-    /// 앞쪽 k = len(idx)개 슬롯에 src의 게임 idx[j]를 복제하고 난수를 seeds[j]에서 만든 두 시드로 바꾼 뒤 first[j]를 적용한다.
-    /// 나머지 슬롯은 멈춘다. grid [M, C, H, W], scal [M, S], mask [M, A], active [M]를 쓴다.
+    /// 앞쪽 k = len(idx)개 슬롯에 src의 게임 idx[j]를 복제하고 난수를 seeds[j]에서 만든 두 시드로 바꾼 뒤 first[j]를 적용한다
+    /// (first[j] < 0이면 행동 없이 복제만). 나머지 슬롯은 멈춘다. grid [M, C, H, W], scal [M, S], mask [M, A], active [M]를 쓴다.
     #[allow(clippy::too_many_arguments)]
     fn fork(
         &mut self,
@@ -723,7 +789,9 @@ impl SearchEnv {
                         env.game.rng_v = JsRng::new(splitmix(&mut r) as u32 | 1);
                         env.game.rng_m = JsRng::new(splitmix(&mut r) as u32 | 1);
                         *slot = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: true };
-                        slot.apply(first[j] as usize)?;
+                        if first[j] >= 0 {
+                            slot.apply(first[j] as usize)?;
+                        }
                         slot.env.write_obs(g, s);
                         slot.env.mask(mk);
                         *act = slot.active;
@@ -732,6 +800,27 @@ impl SearchEnv {
             })
         });
         out.map_err(PyValueError::new_err)
+    }
+
+    /// src 게임 idx[j]를 슬롯 dst[j]에 행동 없이 복제하고 난수를 seeds[j]에서 만든 두 시드로 바꾼다. 다른 슬롯은 그대로 둔다
+    /// (여러 시점의 상태를 모아 둘 때 쓴다).
+    fn store(&mut self, src: PyRef<'_, VecEnv>, idx: PyReadonlyArray1<'_, i64>, dst: PyReadonlyArray1<'_, i64>, seeds: PyReadonlyArray1<'_, u64>) -> PyResult<()> {
+        let (idx, dst, seeds) = (idx.as_slice()?, dst.as_slice()?, seeds.as_slice()?);
+        if idx.len() != dst.len() || idx.len() != seeds.len() {
+            return Err(PyValueError::new_err("store: idx, dst, seeds 길이가 다르다"));
+        }
+        for ((&i, &d), &sd) in idx.iter().zip(dst).zip(seeds) {
+            let (i, d) = (i as usize, d as usize);
+            if i >= src.slots.len() || d >= self.slots.len() {
+                return Err(PyValueError::new_err(format!("store: 게임 {i} 또는 슬롯 {d} 범위 밖")));
+            }
+            let mut env = src.slots[i].env.clone();
+            let mut r = sd;
+            env.game.rng_v = JsRng::new(splitmix(&mut r) as u32 | 1);
+            env.game.rng_m = JsRng::new(splitmix(&mut r) as u32 | 1);
+            self.slots[d] = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: false };
+        }
+        Ok(())
     }
 
     /// 진행 중인 슬롯에만 행동을 적용한다(멈춘 슬롯의 행동은 무시). grid, scal, mask, active를 갱신한다.
@@ -777,6 +866,12 @@ impl SearchEnv {
             })
         });
         out.map_err(PyValueError::new_err)
+    }
+
+    /// 슬롯 j의 보드 문자열과 포탑
+    fn board(&self, j: usize) -> (Vec<Vec<String>>, Vec<String>) {
+        let g = &self.slots[j].env.game;
+        (g.board_cells(), g.turret_cells())
     }
 
     /// 슬롯별 결과: 누적 보상, 지난 날 수, 사망 여부, 잃은 하트(사망이면 복제 시점 하트 전부)

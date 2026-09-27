@@ -55,7 +55,9 @@ def act_cat(cells, phase, a):
         if ty == 0:
             return "돌 성에 넣기" if src[0] == "s" else "화살탑 포탑" if src[0] == "t" else "성 쪽 드래그"
         dst = cells[ty - 1][tx - 1] if 1 <= ty <= 7 and 1 <= tx <= 6 else "~~"
-        if dst in ("..", "~~"):
+        if dst == "~~":
+            return "버리기"
+        if dst == "..":
             return "빈칸 이동"
         g1, g2 = sorted((GROUP.get(src[0], "기타"), GROUP.get(dst[0], "기타")))
         return f"교환 {g1}-{g2}"
@@ -88,14 +90,21 @@ def board_info(cells, turrets):
     return towers / land, tiers
 
 
-def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None):
-    """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝)"""
-    env = ts.VecEnv(n, seed=seed)
+def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None):
+    """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝),
+    frames: 리플레이용 기록(게임별 목록, 행동 직전 상태·보드·고른 행동·정책 상위 행동·탐색 후보),
+    env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다"""
+    fresh = env is None
+    if fresh:
+        env = ts.VecEnv(n, seed=seed)
     grid = np.zeros((n, C, H, W), np.float32)
     scal = np.zeros((n, S), np.float32)
     mask = np.zeros((n, A), bool)
     rew, done, days = np.zeros(n, np.float32), np.zeros(n, bool), np.zeros(n, np.float32)
-    env.reset(grid, scal, mask)
+    if fresh:
+        env.reset(grid, scal, mask)
+    else:
+        env.observe(grid, scal, mask)
     nc = 1 + k + r
     if search:
         m = n * nc * s
@@ -187,6 +196,21 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None):
                                        "base": act_cat(cells, phase, int(base_act[i])), "chosen": cat, "changed": ch,
                                        "gain": float(dm[list(cands).index(act[i])]) if ch else 0.0,
                                        "rank": int((logits[i] > logits[i, act[i]]).sum())})
+        if frames is not None:
+            probs = np.exp(logits - logits.max(1, keepdims=True))
+            probs /= probs.sum(1, keepdims=True)
+            for i in np.nonzero(alive)[0]:
+                day, hearts, swaps, phase, score = env.state(int(i))
+                cells, tur = env.board(int(i))
+                top = np.argsort(-probs[i])[:3]
+                f = {"d": day, "h": hearts, "s": swaps, "p": phase, "sc": score, "b": [c for row in cells for c in row], "t": tur,
+                     "a": int(act[i]), "pa": round(float(probs[i, act[i]]), 3),
+                     "top": [[int(x), round(float(probs[i, x]), 3)] for x in top if probs[i, x] > 0.005]}
+                if i in info:
+                    cands, qm, dm, sd = info[i]
+                    f["base"] = int(base_act[i])
+                    f["cand"] = [[int(c), round(float(m_), 4), round(float(e_), 4)] for c, m_, e_ in zip(cands, dm, sd)]
+                frames[i].append(f)
         if rec is not None:
             for i in np.nonzero(alive)[0]:
                 rec["game"].append(int(i))

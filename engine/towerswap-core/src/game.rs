@@ -139,6 +139,16 @@ pub struct Game {
     /// 통계: 환경이 센 행동 수, 등급별 상자 보관 기간 합(생성→개봉, 행동 수와 날)
     pub stat_steps: u64,
     pub chest_hold: [(u64, u64); 5],
+    /// 통계: 공격 타워 종류(0 화살탑, 1 발리스타, 2 대포, 3 포탑 화살탑) × 등급별로 드래곤에게 준 실제 피해(초과분 제외)와
+    /// 밤을 맞은 타워 수(타워-밤). 게임 규칙에는 영향이 없다
+    pub stat_dmg: [[f64; 5]; 4],
+    pub stat_tower_nights: [[u32; 5]; 4],
+    /// 통계: 같은 종류 분류 × 행(0 성 줄 ~ 7)별 실제 피해와 타워-밤 수
+    pub stat_dmg_row: [[f64; 8]; 4],
+    pub stat_tn_row: [[u32; 8]; 4],
+    /// 통계: 매치·모루로 만들어진 방어물(0 화살탑, 1 발리스타, 2 대포, 3 얼음벽, 4 상자)의 결과 등급별 수와 결과 행별 수
+    pub stat_made: [[u32; 5]; 5],
+    pub stat_made_row: [[u32; 8]; 5],
     pub combo: i32,        // rg
     pub loops: i64,        // ea.loops 대용 (순서만 의미 있음)
     // 스왑 직후 첫 매치 판정에서 우선하는 타일 (nV, nJ)
@@ -363,6 +373,19 @@ impl Game {
             t.frame = 2;
         }
         t.moved_time = loops;
+        let made = match t.kind {
+            Kind::ArrowTower => Some(0),
+            Kind::Ballista => Some(1),
+            Kind::Cannon => Some(2),
+            Kind::IceWall => Some(3),
+            Kind::Chest => Some(4),
+            _ => None,
+        };
+        if let Some(k) = made {
+            let (tier, gy) = (t.tier.clamp(1, 4) as usize, t.gy.clamp(0, 7) as usize);
+            self.stat_made[k][tier] += 1;
+            self.stat_made_row[k][gy] += 1;
+        }
         if up == Kind::Chest {
             t.born = (self.stat_steps, self.day);
             let tier = t.tier.min(4) as usize;
@@ -433,6 +456,12 @@ impl Game {
         self.chest_made = [0; 5];
         self.chest_opened = [0; 5];
         self.chest_hold = [(0, 0); 5];
+        self.stat_dmg = [[0.0; 5]; 4];
+        self.stat_tower_nights = [[0; 5]; 4];
+        self.stat_dmg_row = [[0.0; 8]; 4];
+        self.stat_tn_row = [[0; 8]; 4];
+        self.stat_made = [[0; 5]; 5];
+        self.stat_made_row = [[0; 8]; 5];
         self.stat_steps = 0;
         let day = self.day;
         for t in self.tiles.iter_mut() {
@@ -465,6 +494,12 @@ impl Game {
             chest_opened: [0; 5],
             stat_steps: 0,
             chest_hold: [(0, 0); 5],
+            stat_dmg: [[0.0; 5]; 4],
+            stat_tower_nights: [[0; 5]; 4],
+            stat_dmg_row: [[0.0; 8]; 4],
+            stat_tn_row: [[0; 8]; 4],
+            stat_made: [[0; 5]; 5],
+            stat_made_row: [[0; 8]; 5],
             combo: 0,
             loops: 0,
             swap_a: None,

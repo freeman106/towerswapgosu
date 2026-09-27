@@ -365,10 +365,16 @@ impl Game {
         if self.night.dragons[id].is_dead {
             return;
         }
-        let (dmg, kind, dir) = {
+        let (dmg, kind, dir, tower) = {
             let pr = &self.night.projectiles[p];
-            (pr.damage, pr.tower_kind, pr.dir)
+            (pr.damage, pr.tower_kind, pr.dir, pr.tower)
         };
+        if let Some(k) = self.stat_kind(tower) {
+            let tier = self.tiles[tower].tier.clamp(1, 4) as usize;
+            let eff = dmg.min(self.night.dragons[id].health.max(0.0));
+            self.stat_dmg[k][tier] += eff;
+            self.stat_dmg_row[k][self.tiles[tower].gy.clamp(0, 7) as usize] += eff;
+        }
         self.night.dragons[id].health -= dmg;
         if self.night.dragons[id].health <= 0.0 {
             self.dragon_die(id);
@@ -384,6 +390,17 @@ impl Game {
     }
 
     // ───────────────────────── 타워 ─────────────────────────
+
+    /// 통계용 공격 타워 분류: 0 화살탑, 1 발리스타, 2 대포, 3 포탑 화살탑
+    fn stat_kind(&self, t: TileId) -> Option<usize> {
+        match self.tiles.get(t)?.kind {
+            Kind::ArrowTower if self.is_turret(t) => Some(3),
+            Kind::ArrowTower => Some(0),
+            Kind::Ballista => Some(1),
+            Kind::Cannon => Some(2),
+            _ => None,
+        }
+    }
 
     fn tile_px(&self, t: TileId) -> (f64, f64) {
         let tile = &self.tiles[t];
@@ -748,6 +765,12 @@ impl Game {
         let mut towers: Vec<TileId> = self.turrets[1..=COLS].iter().flatten().copied().collect();
         towers.extend(self.ak.iter().copied());
         towers.retain(|&t| self.tiles[t].kind.weapon().is_some());
+        for &t in &towers {
+            if let Some(k) = self.stat_kind(t) {
+                self.stat_tower_nights[k][self.tiles[t].tier.clamp(1, 4) as usize] += 1;
+                self.stat_tn_row[k][self.tiles[t].gy.clamp(0, 7) as usize] += 1;
+            }
+        }
         self.night.towers = towers;
         for x in 1..=COLS {
             for y in 1..=ROWS {
