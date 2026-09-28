@@ -53,6 +53,8 @@ def parse_args():
     p.add_argument("--merge-rule", default="",
                    help="합성 우선 규칙 '남은 스왑 하한,하루 최대 횟수' (예: 20,6): 은상자 이상을 연 날 기본→동 무기 합성 드래그가 있으면 "
                         "행동을 그 드래그로 제한한다 (행동 마스크 제약). 비우면 없음")
+    p.add_argument("--reinvest-bonus", default="",
+                   help="재투자 보상 '은,금' (예: 3,16.3): 합성으로 만든 은·금상자를 열 때 더한다(연습 배치·상점·악마 거래 상자 제외). 비우면 없음")
     p.add_argument("--silver-starts", type=int, default=0,
                    help="은상자 연습(난이도 6) 시작 상태 수: --pool-ckpt 정책이 실제로 둔 게임의 낮 상태에서 1~6행 자원 하나를 은상자로 바꾼다. "
                         "--start-frac 비율로 새 게임을 이 풀에서 시작한다(연습 게임도 끝까지 둔다)")
@@ -162,7 +164,8 @@ class RunningStd:
 SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest", "r_econ",
                 "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
                 "chest_ge2", "chest_ge3", "chest_ge4", "hold1_steps", "hold1_days", "max_held1",
-                "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3", "emergency", "merge_rule"]
+                "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3", "emergency", "merge_rule",
+                "r_reinvest", "reinvest3", "reinvest4"]
 SILVER_LEVEL = 6  # 은상자 연습 시작의 난이도 번호
 PRACTICE_STATS = ("episodes", "success_path", "success_day", "ready_no_merge", "merge_take", "made2")
 PRACTICE_KEYS = [f"p{lv}_{k}" for lv in (1, 2, 3, 4) for k in PRACTICE_STATS]
@@ -195,6 +198,9 @@ def episode_summary(fin):
     s["games_hold2"], s["games_hold3"] = (col("max_same_held") >= 2).mean(), (col("max_same_held") >= 3).mean()
     s["emergency"] = col("emergency_opens").mean()
     s["merge_rule"] = col("merge_rule_uses").mean()
+    s["r_reinvest"] = col("r_reinvest").mean()
+    reinv = np.array([f["reinvest_opens"] for f in fin])
+    s["reinvest3"], s["reinvest4"] = reinv[:, 2].mean(), reinv[:, 3].mean()
     return s
 
 
@@ -235,7 +241,8 @@ def format_summary(s):
             f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f} (비상 {s['emergency']:.2f}) | "
             f"일반 보관 {s['hold1_steps']:.1f}행동·{s['hold1_days']:.2f}일, 최대 보유 {s['max_held1']:.2f}, "
             f"같은 등급 2개+ 보유 {s['hold2_frac']:.1%}(게임 {s['games_hold2']:.0%}) 3개+ {s['hold3_frac']:.2%}(게임 {s['games_hold3']:.0%}), "
-            f"합성 기회 {s['merge_opps']:.2f}·선택 {s['merge_take']:.0%}, 합성 우선 규칙 {s['merge_rule']:.2f}")
+            f"합성 기회 {s['merge_opps']:.2f}·선택 {s['merge_take']:.0%}, 합성 우선 규칙 {s['merge_rule']:.2f} | "
+            f"합성 은/금상자 개봉 {s['reinvest3']:.3f}/{s['reinvest4']:.3f} 재투자 보상 {s['r_reinvest']:.3f}")
 
 
 def parse_emergency(text):
@@ -260,7 +267,8 @@ def main():
                     econ_w=args.econ_shaping, econ_gamma=args.gamma,
                     no_toss_day_off=bool(args.no_toss_day_off), no_open_normal=bool(args.no_open_normal),
                     open_min_tier=args.open_min_tier, emergency=parse_emergency(args.emergency),
-                    merge_rule=tuple(int(x) for x in args.merge_rule.split(",")) if args.merge_rule else None)
+                    merge_rule=tuple(int(x) for x in args.merge_rule.split(",")) if args.merge_rule else None,
+                    reinvest_bonus=tuple(float(x) for x in args.reinvest_bonus.split(",")) if args.reinvest_bonus else None)
     levels = [int(x) for x in args.start_level.split(",")] if args.start_level else []
     aux_levels = [int(x) for x in args.aux_levels.split(",")] if args.aux_coef > 0 else []
     if levels:
@@ -451,9 +459,9 @@ def main():
             sv = [f for f in ep_hist if f["practice_level"] == SILVER_LEVEL]
             if sv:
                 op = np.array([f["opened"][2] + f["opened"][3] for f in sv])
-                pr += (f" | 은상자 연습 {len(sv)}게임 개봉 {np.mean(op >= 1):.0%}·둘째 {np.mean(op >= 2):.0%} "
+                pr += (f" | 은상자 연습 {len(sv)}게임 개봉 {np.mean(op >= 1):.0%}·둘째 {np.mean(op >= 2):.0%}·셋째 {np.mean(op >= 3):.0%} "
                        f"이후 생존 {np.mean([f['day'] - f['start_day'] for f in sv]):.1f}일 "
-                       f"합성 우선 {np.mean([f['merge_rule_uses'] for f in sv]):.1f}")
+                       f"합성 우선 {np.mean([f['merge_rule_uses'] for f in sv]):.1f} 재투자 보상 {np.mean([f['r_reinvest'] for f in sv]):.2f}")
             print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 정상 시작 "
                   f"{format_summary(episode_summary([f for f in ep_hist if not f['practice']]))}{pr} | "
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}"

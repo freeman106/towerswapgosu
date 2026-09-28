@@ -142,8 +142,9 @@ def report(title, fin, fins, c, games, n):
     print(f"  개봉 수입 {inc / gd:.2f}/게임-날 · 상자 이동·합성 드래그 {chest_drag / gd:.2f}/게임-날 · 순수입 {(inc - chest_drag) / gd:.2f}")
     sm, fo, so = (np.array([g[k] for g in games]) for k in ("silver_made", "first_open", "second_open"))
     q = lambda x: f"평균 {x.mean():.1f} · 중앙 {np.median(x):.0f}" if len(x) else "-"
+    third = np.mean([sum(1 for _, _, t in c.opens[i] if t >= SILVER) >= 3 for i in range(n)])
     print(f"  은상자 깔때기: 첫 생성 {np.mean(sm >= 0):.1%} ({q(sm[sm >= 0])}일) → 첫 개봉 {np.mean(fo >= 0):.1%} ({q(fo[fo >= 0])}일) → "
-          f"두 번째 개봉 {np.mean(so >= 0):.1%} ({q(so[so >= 0])}일)")
+          f"두 번째 개봉 {np.mean(so >= 0):.1%} ({q(so[so >= 0])}일) → 세 번째 개봉 {third:.1%}")
     two = [g for g in games if "between_days" in g]
     if two:
         sp = Counter()

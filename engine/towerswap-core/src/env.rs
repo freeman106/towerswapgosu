@@ -14,6 +14,8 @@
 //! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
 //! - 선택: 상자 개봉 규칙(`open_rule`, 기본 제한 없음). `min_tier` 미만 등급은 열 수 없고, 비상 예외로 지정한 등급만
 //!   남은 스왑·하트가 기준 이하이고 지금 열 수 있는 `min_tier` 이상 상자가 없을 때 열 수 있다(허용일 뿐 강제 개봉은 아니다)
+//! - 선택: 재투자 보상(`reinvest_bonus[등급]`, 기본 0). 합성(업그레이드)으로 만든 상자를 열 때 등급별로 더한다(연습 배치·상점·악마 거래로 받은 상자는 제외).
+//!   게임 점수와 따로 `ep_reinvest`에 합산하고, 합성으로 만든 상자를 연 횟수는 보상과 관계없이 `reinvest_opens[등급]`에 센다
 //! - 선택: 합성 우선(`merge_rule = (남은 스왑 하한, 하루 최대 횟수)`, 기본 끔). 은상자 이상을 연 날 입력 대기에서 남은 스왑이 하한 이상이고
 //!   오늘 이 규칙으로 제한한 결정이 최대 횟수 미만이면, 기본→동 무기 합성 드래그(복제본에 적용해 동 무기가 생기고 은 이상은 안 생기는 수)가
 //!   있을 때 행동을 그 드래그로 제한한다(마스크와 step 모두)
@@ -186,6 +188,13 @@ pub struct Env {
     merge_cache: MergeCache, // 합성 우선 규칙의 합성 드래그 목록 캐시 (상태 키: 행동 수, 날)
     /// 통계: 합성 우선 규칙으로 제한한 결정 수
     pub merge_rule_uses: u32,
+    /// 재투자 보상: 합성으로 만든 상자를 열 때 등급별로 더하는 보상 (인덱스 = 등급 1..4)
+    pub reinvest_bonus: [f32; 5],
+    /// 이 게임의 재투자 보상 합계 (게임 점수와 별도)
+    pub ep_reinvest: f32,
+    /// 통계: 합성으로 만든 상자를 연 횟수 (등급별)
+    pub reinvest_opens: [u32; 5],
+    step_bonus: f32, // 이번 행동에서 받은 재투자 보상
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
@@ -231,6 +240,10 @@ impl Env {
             merge_forced_today: 0,
             merge_cache: MergeCache::default(),
             merge_rule_uses: 0,
+            reinvest_bonus: [0.0; 5],
+            ep_reinvest: 0.0,
+            reinvest_opens: [0; 5],
+            step_bonus: 0.0,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
@@ -465,6 +478,7 @@ impl Env {
             forced = true;
         }
         let (s0, d0, a0) = (self.game.score(), self.game.day, self.game.achievements);
+        self.step_bonus = 0.0;
         let phi0 = if self.econ_w != 0.0 { self.econ_w * econ_units(self.game.swaps, &self.chest_census().1) } else { 0.0 };
         let opp = self.game.phase == Phase::Idle && self.chest_merge_available();
         let merged0: u32 = self.game.chest_made[2..].iter().sum();
@@ -497,6 +511,7 @@ impl Env {
         self.chest_seen |= new;
         let bonus = (1..=4).filter(|&t| new & (1 << t) != 0).map(|t| self.chest_bonus[t]).sum::<f32>();
         self.ep_chest += bonus;
+        self.ep_reinvest += self.step_bonus;
         self.ep_survival += (self.game.day - d0) as f32 * 0.01;
         self.ep_boss += (self.game.achievements - a0) as f32 * 10.0;
         let days = (self.game.day - d0) as u32;
@@ -515,7 +530,7 @@ impl Env {
             self.merge_forced_today = 0;
         }
         Some(StepOut {
-            reward: (g.score() - s0) as f32 / 100.0 + bonus + econ,
+            reward: (g.score() - s0) as f32 / 100.0 + bonus + econ + self.step_bonus,
             done: g.phase == Phase::GameOver,
             days,
         })
@@ -523,7 +538,7 @@ impl Env {
 
     fn apply(&mut self, a: usize) -> bool {
         // 상자 개봉 규칙: 낮의 상자 탭만 해당 (허용되지 않으면 무효, 비상 예외로 열면 센다)
-        let (mut emergency, mut silver) = (false, false);
+        let (mut emergency, mut silver, mut merged_tier) = (false, false, 0usize);
         if (A_CELL..A_YES).contains(&a) && matches!(self.game.phase, Phase::Idle | Phase::Dusk) {
             let c = a - A_CELL;
             let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
@@ -533,6 +548,9 @@ impl Env {
                 }
                 emergency = self.game.tiles[t].tier < self.open_rule.min_tier;
                 silver = self.game.tiles[t].tier >= 3;
+                if self.game.tiles[t].chest_merged {
+                    merged_tier = self.game.tiles[t].tier.min(4) as usize;
+                }
             }
         }
         let g = &mut self.game;
@@ -558,6 +576,10 @@ impl Env {
                         self.emergency_opens += emergency as u32;
                         if silver {
                             self.silver_open_day = g.day;
+                        }
+                        if merged_tier > 0 {
+                            self.reinvest_opens[merged_tier] += 1;
+                            self.step_bonus += self.reinvest_bonus[merged_tier];
                         }
                     }
                     r

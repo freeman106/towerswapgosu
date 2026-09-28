@@ -74,6 +74,8 @@ pub struct Tile {
     pub alive: bool, // 원본 ak 목록에 있는지
     pub reload: f64, // 밤 재장전 (reloadDelay)
     pub born: (u64, i32), // 통계: 상자가 된 시점 (행동 수 stat_steps, 날)
+    /// 합성(업그레이드)으로 만들어진 상자인지. 연습 배치·상점·악마 거래·보드 불러오기로 생긴 상자는 아니다
+    pub chest_merged: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,6 +255,7 @@ impl Game {
             alive: true,
             reload: 0.0,
             born: (0, 0),
+            chest_merged: false,
         });
         self.ak.push(id);
         id
@@ -364,6 +367,7 @@ impl Game {
             t.flipped = false;
         }
         t.kind = up;
+        t.chest_merged = up == Kind::Chest;
         t.match_join = None;
         if t.kind == Kind::Cannon && t.gx >= 5 {
             t.flipped = true;
@@ -1025,6 +1029,7 @@ impl Game {
         tile.dynamite = 0;
         tile.flipped = false;
         tile.born = (steps, day);
+        tile.chest_merged = false;
         Some((tile.gx, tile.gy))
     }
 

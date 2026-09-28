@@ -107,7 +107,10 @@ def main():
     made3a = np.array([f["made"][2] + f["made"][3] for f in ra])
     made3b = np.array([f["made"][2] + f["made"][3] for f in rb])
     second = np.array([len(o) >= 2 for o in silver_open])
-    print(f"  다음 은상자: 새로 생성 있음 {np.mean(made3a > 0):.1%} · 없음 {np.mean(made3b > 0):.1%} | 두 번째 은상자 개봉 {second.mean():.1%}")
+    third = np.array([len(o) >= 3 for o in silver_open])
+    reinv = np.array([f["reinvest_opens"][2] + f["reinvest_opens"][3] for f in ra])
+    print(f"  다음 은상자: 새로 생성 있음 {np.mean(made3a > 0):.1%} · 없음 {np.mean(made3b > 0):.1%} | 두 번째 은상자 개봉 {second.mean():.1%} · "
+          f"세 번째 {third.mean():.1%} · 합성 은·금상자 개봉 {reinv.mean():.2f}/판")
     ea, eb = np.array([f["emergency_opens"] for f in ra]), np.array([f["emergency_opens"] for f in rb])
     print(f"  비상 동상자 개봉/게임: 있음 {ea.mean():.2f} · 없음 {eb.mean():.2f}")
     print(f"  시작 뒤 밤 직전 (있음 / 없음, 둘 다 살아 있는 판만 짝지어 비교):")

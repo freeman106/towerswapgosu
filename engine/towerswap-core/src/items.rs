@@ -374,6 +374,7 @@ impl Game {
                     t.frame = 1;
                     t.tier = tier;
                     t.removed = false;
+                    t.chest_merged = false;
                 }
             }
         } else {
@@ -538,6 +539,7 @@ impl Game {
         let t = &mut self.tiles[id];
         t.moved_time = loops;
         t.kind = kind;
+        t.chest_merged = false;
         t.frame = 1;
         t.tier = tier;
         t.removed = false;
