@@ -2,8 +2,9 @@
 //! - 마스크가 켠 행동은 반드시 유효하다.
 //! - 드래그 마스크는 실제 유효성과 정확히 같다(제한이 없는 평일).
 //! - 입력을 받는 단계에는 유효한 행동이 하나 이상 있다.
+//! - 휴식일 버리기 금지를 켠 게임(절반)에서는 휴식일의 버리기 드래그가 마스크와 step 모두에서 막힌다.
 use towerswap_core::env::{Env, A_CELL, N_ACTIONS};
-use towerswap_core::{Game, Phase};
+use towerswap_core::{Dir, Game, Phase};
 
 struct Lcg(u64);
 impl Lcg {
@@ -59,6 +60,7 @@ fn mask_matches_validity() {
     let mut r = Lcg(12345);
     let mut mask = vec![false; N_ACTIONS];
     let (mut states, mut episodes_done, mut phases) = (0u64, 0u64, std::collections::HashSet::new());
+    let mut toss_blocked = 0u64;
     for i in 0..300 {
         let mut game = Game::new_game(r.next() as u32 | 1, r.next() as u32 | 1);
         if i % 3 != 0 {
@@ -72,6 +74,7 @@ fn mask_matches_validity() {
             game.achievements = ((day - 1) / 10).min(5);
         }
         let mut env = Env::from_game(game);
+        env.no_toss_day_off = i % 2 == 1;
         for _ in 0..1500 {
             if env.done() {
                 episodes_done += 1;
@@ -82,6 +85,7 @@ fn mask_matches_validity() {
             assert!(!valid.is_empty(), "유효 행동 없음: {:?}", env.game.phase);
             phases.insert(format!("{:?}", env.game.phase));
             let weekday = env.game.phase == Phase::Idle && env.game.day != env.game.day_off_day;
+            let off_ban = env.no_toss_day_off && env.game.phase == Phase::Idle && env.game.day == env.game.day_off_day;
             for a in 0..N_ACTIONS {
                 let ok = env.clone().step(a).is_some();
                 if mask[a] {
@@ -90,12 +94,20 @@ fn mask_matches_validity() {
                 if weekday && a < A_CELL {
                     assert_eq!(mask[a], ok, "드래그 {a} 마스크 불일치");
                 }
+                if off_ban && a < A_CELL {
+                    let c = a / 4;
+                    if env.game.drag_is_toss((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4)) {
+                        assert!(!mask[a] && !ok, "휴식일 버리기 {a}가 막히지 않음");
+                        toss_blocked += 1;
+                    }
+                }
             }
             states += 1;
             let a = valid[(r.next() as usize) % valid.len()];
             env.step(a).unwrap();
         }
     }
-    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}");
+    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개");
     assert!(states > 10_000);
+    assert!(toss_blocked > 0);
 }

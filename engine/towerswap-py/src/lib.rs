@@ -28,6 +28,7 @@ struct Slot {
     erng: u64, // 전문가 동점 깨기
     chest_bonus: [f32; 5],
     econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
+    no_toss_day_off: bool,    // 휴식일 버리기 금지
     practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
@@ -68,6 +69,7 @@ impl Slot {
         };
         self.env.chest_bonus = self.chest_bonus;
         (self.env.econ_w, self.env.econ_gamma) = self.econ;
+        self.env.no_toss_day_off = self.no_toss_day_off;
         self.steps = 0;
     }
 }
@@ -289,9 +291,10 @@ struct VecEnv {
 impl VecEnv {
     /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치),
     /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4],
-    /// econ_w, econ_gamma: 경제 조형 가중치(스왑 1개당, 0이면 끔)와 하루 할인(학습의 γ와 같게)
+    /// econ_w, econ_gamma: 경제 조형 가중치(스왑 1개당, 0이면 끔)와 하루 할인(학습의 γ와 같게),
+    /// no_toss_day_off: 휴식일 버리기 금지(행동 마스크 제약)
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0))]
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false))]
     fn new(
         n: usize,
         seed: u64,
@@ -300,6 +303,7 @@ impl VecEnv {
         chest_bonus: Option<Vec<f32>>,
         econ_w: f32,
         econ_gamma: f32,
+        no_toss_day_off: bool,
     ) -> PyResult<Self> {
         let mut cb = [0.0f32; 5];
         if let Some(b) = chest_bonus {
@@ -322,6 +326,7 @@ impl VecEnv {
                     erng: splitmix(&mut root),
                     chest_bonus: cb,
                     econ: (econ_w, econ_gamma),
+                    no_toss_day_off,
                     practice: 0,
                     aux: None,
                     aux_prep: false,
@@ -645,6 +650,7 @@ impl VecEnv {
             slot.env = search.slots[j].env.clone();
             slot.env.chest_bonus = slot.chest_bonus;
             (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
+            slot.env.no_toss_day_off = slot.no_toss_day_off;
             slot.steps = 0;
             slot.practice = 0;
             slot.aux = None;

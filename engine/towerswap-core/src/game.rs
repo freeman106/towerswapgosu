@@ -1005,6 +1005,11 @@ impl Game {
         self.drag_plan(x, y, dir).is_some()
     }
 
+    /// 드래그가 버리기(§5.3 d)인지 (상태 변화 없음)
+    pub fn drag_is_toss(&self, x: i32, y: i32, dir: Dir) -> bool {
+        matches!(self.drag_plan(x, y, dir), Some((_, DragPlan::Toss)))
+    }
+
     /// 드래그(스왑·이동·버리기·성 보수·포탑·모루). 무효면 아무 일도 없다.
     pub fn drag(&mut self, x: i32, y: i32, dir: Dir) -> ActionResult {
         if self.phase != Phase::Idle {

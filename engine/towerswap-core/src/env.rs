@@ -11,6 +11,7 @@
 //! 환경 수준 제한
 //! - 대포 방향 전환은 대포마다 하루 1회
 //! - 휴식일 행동은 DAY_OFF_CAP개까지 (넘으면 하루 끝내기만 가능)
+//! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
 //! - TNT·요정 창의 취소는 막는다(상태가 그대로인 행동의 반복을 막는다). 요정은 가능한 이동이 있을 때만 쓸 수 있다.
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
@@ -141,6 +142,8 @@ pub struct Env {
     /// 경제 조형의 가중치(스왑 1개당)와 하루 할인
     pub econ_w: f32,
     pub econ_gamma: f32,
+    /// 휴식일 버리기 금지 (마스크와 step 모두)
+    pub no_toss_day_off: bool,
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
@@ -178,6 +181,7 @@ impl Env {
             chest_bonus: [0.0; 5],
             econ_w: 0.0,
             econ_gamma: 1.0,
+            no_toss_day_off: false,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
@@ -262,7 +266,8 @@ impl Env {
                     for (x, y) in cells(1) {
                         for d in 0..4 {
                             let a = A_DRAG + ((y - 1) as usize * COLS + (x - 1) as usize) * 4 + d;
-                            m[a] = g.drag_valid(x, y, Dir::from_index(d));
+                            let dir = Dir::from_index(d);
+                            m[a] = g.drag_valid(x, y, dir) && !(closed && self.no_toss_day_off && g.drag_is_toss(x, y, dir));
                         }
                     }
                 }
@@ -376,7 +381,11 @@ impl Env {
         let g = &mut self.game;
         let r = if a < A_CELL {
             let c = (a - A_DRAG) / 4;
-            g.drag((c % COLS) as i32 + 1, (c / COLS) as i32 + 1, Dir::from_index(a % 4))
+            let (x, y, dir) = ((c % COLS) as i32 + 1, (c / COLS) as i32 + 1, Dir::from_index(a % 4));
+            if self.no_toss_day_off && g.closed_day() && g.drag_is_toss(x, y, dir) {
+                return false;
+            }
+            g.drag(x, y, dir)
         } else if a < A_YES {
             let c = a - A_CELL;
             let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);

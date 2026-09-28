@@ -7,6 +7,7 @@
 import argparse
 import json
 import time
+from collections import Counter
 
 import numpy as np
 import torch
@@ -90,13 +91,29 @@ def board_info(cells, turrets):
     return towers / land, tiers
 
 
-def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None):
+class NoSearchDayOff:
+    """play()의 ctl: 휴식일(수락한 날)에는 탐색하지 않고 정책만 둔다"""
+
+    def before(self, env, alive):
+        nosearch = np.zeros(len(alive), bool)
+        for i in np.nonzero(alive)[0]:
+            day = env.state(int(i))[0]
+            nosearch[i] = day % 10 == 1 and env.made(int(i))[2] == day
+        return {}, nosearch
+
+    def after(self, env, i, a):
+        pass
+
+
+def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None, ctl=None, no_toss=False):
     """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝),
     frames: 리플레이용 기록(게임별 목록, 행동 직전 상태·보드·고른 행동·정책 상위 행동·탐색 후보),
-    env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다"""
+    env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다,
+    ctl: 행동 개입. ctl.before(env, alive) → (게임 → 강제 행동, 탐색 안 할 게임 bool 배열), ctl.after(env, i, 행동)은 행동 직전에 호출,
+    no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용)"""
     fresh = env is None
     if fresh:
-        env = ts.VecEnv(n, seed=seed)
+        env = ts.VecEnv(n, seed=seed, no_toss_day_off=no_toss)
     grid = np.zeros((n, C, H, W), np.float32)
     scal = np.zeros((n, S), np.float32)
     mask = np.zeros((n, A), bool)
@@ -125,12 +142,15 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
         logits, _ = pol(grid, scal, mask)
         act = (logits + np.random.default_rng([seed, step]).gumbel(size=(n, A))).argmax(1)
         base_act = act.copy()
+        forced, nosearch = ctl.before(env, alive) if ctl else ({}, np.zeros(n, bool))
+        for i in forced:
+            nosearch[i] = True
         info = {}  # 게임 → (후보, 후보별 평균 Q, 기본 대비 차이 평균, 표준오차)
         if search:
             # 후보: 기본 행동, 확률 상위 k개, 그 밖의 유효 행동 r개
             rng = np.random.default_rng([seed, step, 11])
             idx, first, which = [], [], []
-            for i in np.nonzero(alive & (mask.sum(1) >= 2))[0]:
+            for i in np.nonzero(alive & (mask.sum(1) >= 2) & ~nosearch)[0]:
                 valid = np.nonzero(mask[i])[0]
                 top = valid[np.argsort(-logits[i, valid])[:k]]
                 cand = [int(act[i])] + [int(a) for a in top if a != act[i]]
@@ -178,6 +198,8 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
                         stats["rank"][min(int((logits[i] > logits[i, c]).sum()), 4)] += 1
                         stats["gain"].append(float(mean[j]))
                         act[i] = c
+        for i, a in forced.items():
+            act[i] = a
         if log is not None:
             for i in np.nonzero(alive)[0]:
                 day, hearts, swaps, phase, _ = env.state(int(i))
@@ -225,6 +247,9 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
                 rec["dmean"].append(pad(dm, np.nan).astype(np.float32))
                 rec["dsem"].append(pad(sd, np.nan).astype(np.float32))
                 rec["searched"].append(i in info)
+        if ctl:
+            for i in np.nonzero(alive)[0]:
+                ctl.after(env, i, int(act[i]))
         env.step(act, grid, scal, mask, rew, done, days)
         fins = {f["env"]: f for f in env.pop_finished()}
         if rec is not None:
@@ -248,7 +273,8 @@ def summary(name, fin, secs):
     r30 = fin >= 30
     score = np.mean([d + 1000 * min(5, (d - 1) // 10) for d in fin])
     return (f"{name}: day {fin.mean():.2f} · 점수 {score:.0f} · 30일 도달 {r30.mean():.1%} · "
-            f"도달 후 통과 {(fin > 30).sum() / max(r30.sum(), 1):.1%} · 실행 {secs:.0f}s")
+            f"도달 후 통과 {(fin > 30).sum() / max(r30.sum(), 1):.1%} · 32·35·40일 도달 {np.mean(fin >= 32):.1%}/{np.mean(fin >= 35):.1%}/{np.mean(fin >= 40):.1%} · 실행 {secs:.0f}s\n"
+            f"  사망일 분포(25일+): {dict(sorted(Counter(int(d) for d in fin if d >= 25).items()))}")
 
 
 def main():
@@ -261,6 +287,8 @@ def main():
     p.add_argument("--z", type=float, default=2.0, help="기본 행동 대비 짝 차이 평균이 z·표준오차보다 클 때만 바꾼다 (0이면 평균만 비교)")
     p.add_argument("--log", default="", help="분석용 기록(JSON) 경로: 결정·하루 단위 (두 조건 모두)")
     p.add_argument("--record", default="", help="증류용 기록(npz) 경로: 탐색 조건의 모든 스텝 (관측, 행동, 후보별 Q, 보상)")
+    p.add_argument("--no-toss-day-off", action="store_true", help="휴식일 버리기 금지 (두 조건 모두)")
+    p.add_argument("--no-search-day-off", action="store_true", help="휴식일에는 탐색하지 않는다")
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
@@ -270,11 +298,12 @@ def main():
     logs = {c: {"dec": [], "dusk": [], "morning": []} for c in ("base", "search")} if args.log else {"base": None, "search": None}
     rec = {k_: [] for k_ in ("game", "grid", "scal", "mask", "act", "cands", "qmean", "dmean", "dsem", "searched", "rew", "days", "done")} if args.record else None
     t0 = time.time()
-    base = play(pol, args.games, args.seed, False, 0, 0, 0, None, log=logs["base"])
+    base = play(pol, args.games, args.seed, False, 0, 0, 0, None, log=logs["base"], no_toss=args.no_toss_day_off)
     tb = time.time() - t0
     stats = {"searched": 0, "changed": 0, "rank": [0] * 5, "gain": [], "rollout_steps": 0}
     t0 = time.time()
-    srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z, log=logs["search"], rec=rec)
+    srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z, log=logs["search"], rec=rec,
+                ctl=NoSearchDayOff() if args.no_search_day_off else None, no_toss=args.no_toss_day_off)
     ts_ = time.time() - t0
     if args.log:
         with open(args.log, "w") as f:

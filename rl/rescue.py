@@ -18,6 +18,32 @@ from search_eval import Policy, board_info, play
 AGENTS = (("정책 혼자", False, 0, 0, 0), ("기존 탐색", True, 3, 2, 8), ("강한 탐색", True, 5, 6, 16))
 
 
+def restore(frames, seed, points, M):
+    """같은 시드 환경에 기록된 행동을 다시 두며 시점 points[q] = (게임, 프레임 번호)의 상태를
+    SearchEnv 슬롯 q·M .. (q+1)·M에 가상 난수 M개로 복제해 모은다(일차·하트·스왑이 기록과 같은지 확인)"""
+    n = len(frames)
+    env = ts.VecEnv(n, seed=seed)
+    grid, scal, mask = np.zeros((n, C, H, W), np.float32), np.zeros((n, S), np.float32), np.zeros((n, A), bool)
+    rew, done, days = np.zeros(n, np.float32), np.zeros(n, bool), np.zeros(n, np.float32)
+    env.reset(grid, scal, mask)
+    hold = ts.SearchEnv(len(points) * M)
+    at = {}
+    for q, (i, t) in enumerate(points):
+        at.setdefault(t, []).append((q, i))
+    for t in range(max(t for _, t in points) + 1):
+        for q, i in at.get(t, []):
+            day, hearts, swaps, _, _ = env.state(i)
+            f = frames[i][t]
+            assert (day, hearts, swaps) == (f["d"], f["h"], f["s"]), f"복원 실패: 게임 {i} 행동 {t}"
+            hold.store(env, np.full(M, i, np.int64), np.arange(q * M, (q + 1) * M, dtype=np.int64),
+                       np.random.default_rng([seed, q, 5]).integers(1, 2 ** 62, size=M, dtype=np.uint64))
+        act = np.array([frames[i][t]["a"] if t < len(frames[i]) else int(np.argmax(mask[i])) for i in range(n)], np.int64)
+        env.step(act, grid, scal, mask, rew, done, days)
+        env.pop_finished()
+    print("복원 확인 완료 (되돌린 상태의 일차·하트·스왑이 기록과 같음)", flush=True)
+    return hold
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("ckpt")
@@ -53,25 +79,7 @@ def main():
     print(f"되돌릴 시점 {P}개 (게임 {len(set(q[0] for q in points))}, 복제 {M}개씩)", flush=True)
 
     # 3. 같은 시드 환경에 기록된 행동을 다시 두며 되돌릴 시점의 상태를 모은다
-    env = ts.VecEnv(n, seed=args.seed)
-    grid, scal, mask = np.zeros((n, C, H, W), np.float32), np.zeros((n, S), np.float32), np.zeros((n, A), bool)
-    rew, done, days = np.zeros(n, np.float32), np.zeros(n, bool), np.zeros(n, np.float32)
-    env.reset(grid, scal, mask)
-    hold = ts.SearchEnv(P * M)
-    at = {}
-    for q, (i, t, D, b) in enumerate(points):
-        at.setdefault(t, []).append((q, i))
-    for t in range(max(len(f) for f in frames)):
-        for q, i in at.get(t, []):
-            day, hearts, swaps, _, _ = env.state(i)
-            f = frames[i][t]
-            assert (day, hearts, swaps) == (f["d"], f["h"], f["s"]), f"복원 실패: 게임 {i} 행동 {t}"
-            hold.store(env, np.full(M, i, np.int64), np.arange(q * M, (q + 1) * M, dtype=np.int64),
-                       np.random.default_rng([args.seed, q, 5]).integers(1, 2 ** 62, size=M, dtype=np.uint64))
-        act = np.array([frames[i][t]["a"] if t < len(frames[i]) else int(np.argmax(mask[i])) for i in range(n)], np.int64)
-        env.step(act, grid, scal, mask, rew, done, days)
-        env.pop_finished()
-    print("복원 확인 완료 (되돌린 상태의 일차·하트·스왑이 기록과 같음)", flush=True)
+    hold = restore(frames, args.seed, [(i, t) for i, t, D, b in points], M)
 
     # 4. 같은 상태에서 세 에이전트로 이어 둔다 (정책 샘플링 잡음은 에이전트끼리 같다)
     res = {}
