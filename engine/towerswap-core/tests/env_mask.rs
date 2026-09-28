@@ -3,7 +3,9 @@
 //! - 드래그 마스크는 실제 유효성과 정확히 같다(제한이 없는 평일).
 //! - 입력을 받는 단계에는 유효한 행동이 하나 이상 있다.
 //! - 휴식일 버리기 금지를 켠 게임(절반)에서는 휴식일의 버리기 드래그가 마스크와 step 모두에서 막힌다.
-use towerswap_core::env::{Env, A_CELL, N_ACTIONS};
+//! - 일반 상자 개봉 금지를 켠 게임(4판 중 1판 꼴)에서는 1등급 상자 탭이 마스크와 step 모두에서 막힌다.
+use towerswap_core::env::{Env, A_CELL, A_YES, N_ACTIONS};
+use towerswap_core::kinds::Kind;
 use towerswap_core::{Dir, Game, Phase};
 
 struct Lcg(u64);
@@ -60,7 +62,7 @@ fn mask_matches_validity() {
     let mut r = Lcg(12345);
     let mut mask = vec![false; N_ACTIONS];
     let (mut states, mut episodes_done, mut phases) = (0u64, 0u64, std::collections::HashSet::new());
-    let mut toss_blocked = 0u64;
+    let (mut toss_blocked, mut open_blocked) = (0u64, 0u64);
     for i in 0..300 {
         let mut game = Game::new_game(r.next() as u32 | 1, r.next() as u32 | 1);
         if i % 3 != 0 {
@@ -75,6 +77,7 @@ fn mask_matches_validity() {
         }
         let mut env = Env::from_game(game);
         env.no_toss_day_off = i % 2 == 1;
+        env.no_open_normal = i % 4 < 2 && i % 3 != 0;
         for _ in 0..1500 {
             if env.done() {
                 episodes_done += 1;
@@ -101,13 +104,23 @@ fn mask_matches_validity() {
                         toss_blocked += 1;
                     }
                 }
+                let tap_phase = matches!(env.game.phase, Phase::Idle | Phase::Dusk);
+                if env.no_open_normal && tap_phase && (A_CELL..A_YES).contains(&a) {
+                    let c = a - A_CELL;
+                    let (x, y) = ((c % 6) as i32 + 1, (c / 6) as i32);
+                    if env.game.tile_at(x, y).map_or(false, |t| env.game.tiles[t].kind == Kind::Chest && env.game.tiles[t].tier <= 1) {
+                        assert!(!mask[a] && !ok, "일반 상자 탭 {a}이 막히지 않음");
+                        open_blocked += 1;
+                    }
+                }
             }
             states += 1;
             let a = valid[(r.next() as usize) % valid.len()];
             env.step(a).unwrap();
         }
     }
-    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개");
+    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개, 막힌 일반 상자 탭 {open_blocked}개");
     assert!(states > 10_000);
     assert!(toss_blocked > 0);
+    assert!(open_blocked > 0);
 }

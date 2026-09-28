@@ -29,7 +29,8 @@ struct Slot {
     chest_bonus: [f32; 5],
     econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
     no_toss_day_off: bool,    // 휴식일 버리기 금지
-    practice: u8,             // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
+    no_open_normal: bool,     // 일반 상자 개봉 금지
+    practice: u8,            // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
     aux_hold: Option<i32>,    // 보관 연습(5단계) 시작일: 확인 구간(이틀) 동안 매 결정에 투자 greedy의 최선 행동 집합을 붙인다
@@ -70,6 +71,7 @@ impl Slot {
         self.env.chest_bonus = self.chest_bonus;
         (self.env.econ_w, self.env.econ_gamma) = self.econ;
         self.env.no_toss_day_off = self.no_toss_day_off;
+        self.env.no_open_normal = self.no_open_normal;
         self.steps = 0;
     }
 }
@@ -292,9 +294,9 @@ impl VecEnv {
     /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치),
     /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4],
     /// econ_w, econ_gamma: 경제 조형 가중치(스왑 1개당, 0이면 끔)와 하루 할인(학습의 γ와 같게),
-    /// no_toss_day_off: 휴식일 버리기 금지(행동 마스크 제약)
+    /// no_toss_day_off: 휴식일 버리기 금지, no_open_normal: 일반(1등급) 상자 개봉 금지 (둘 다 행동 마스크 제약)
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false))]
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false))]
     fn new(
         n: usize,
         seed: u64,
@@ -304,6 +306,7 @@ impl VecEnv {
         econ_w: f32,
         econ_gamma: f32,
         no_toss_day_off: bool,
+        no_open_normal: bool,
     ) -> PyResult<Self> {
         let mut cb = [0.0f32; 5];
         if let Some(b) = chest_bonus {
@@ -327,6 +330,7 @@ impl VecEnv {
                     chest_bonus: cb,
                     econ: (econ_w, econ_gamma),
                     no_toss_day_off,
+                    no_open_normal,
                     practice: 0,
                     aux: None,
                     aux_prep: false,
@@ -651,6 +655,7 @@ impl VecEnv {
             slot.env.chest_bonus = slot.chest_bonus;
             (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
             slot.env.no_toss_day_off = slot.no_toss_day_off;
+            slot.env.no_open_normal = slot.no_open_normal;
             slot.steps = 0;
             slot.practice = 0;
             slot.aux = None;

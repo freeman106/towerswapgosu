@@ -12,6 +12,7 @@
 //! - 대포 방향 전환은 대포마다 하루 1회
 //! - 휴식일 행동은 DAY_OFF_CAP개까지 (넘으면 하루 끝내기만 가능)
 //! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
+//! - 선택: 일반 상자 개봉 금지(`no_open_normal`, 기본 끔). 1등급 상자는 보관만 하고 동상자(2등급)부터 열 수 있다
 //! - TNT·요정 창의 취소는 막는다(상태가 그대로인 행동의 반복을 막는다). 요정은 가능한 이동이 있을 때만 쓸 수 있다.
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
@@ -144,6 +145,8 @@ pub struct Env {
     pub econ_gamma: f32,
     /// 휴식일 버리기 금지 (마스크와 step 모두)
     pub no_toss_day_off: bool,
+    /// 일반(1등급) 상자 개봉 금지 (마스크와 step 모두)
+    pub no_open_normal: bool,
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
@@ -182,6 +185,7 @@ impl Env {
             econ_w: 0.0,
             econ_gamma: 1.0,
             no_toss_day_off: false,
+            no_open_normal: false,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
@@ -245,6 +249,7 @@ impl Env {
         let t = g.tile_at(x, y).unwrap();
         match g.tiles[t].kind {
             Kind::Cannon => !self.flipped_today.contains(&t),
+            Kind::Chest => !(self.no_open_normal && g.tiles[t].tier <= 1),
             Kind::Fairy | Kind::FairyHouse => *fairy_ok.get_or_insert_with(|| g.fairy_any_move()),
             _ => true,
         }
@@ -391,6 +396,9 @@ impl Env {
             let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
             match g.phase {
                 Phase::Idle | Phase::Dusk => {
+                    if self.no_open_normal && g.tile_at(x, y).map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier <= 1) {
+                        return false;
+                    }
                     let cannon = g.tile_at(x, y).filter(|&t| g.tiles[t].kind == Kind::Cannon);
                     if cannon.map_or(false, |t| self.flipped_today.contains(&t)) {
                         return false;

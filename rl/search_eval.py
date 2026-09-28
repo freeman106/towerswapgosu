@@ -92,13 +92,16 @@ def board_info(cells, turrets):
 
 
 class NoSearchDayOff:
-    """play()의 ctl: 휴식일(수락한 날)에는 탐색하지 않고 정책만 둔다"""
+    """play()의 ctl: 휴식일(수락한 날)에는 탐색하지 않고 정책만 둔다. until > 0이면 그날 이후(until + 1일부터)도 탐색하지 않는다"""
+
+    def __init__(self, until=0):
+        self.until = until
 
     def before(self, env, alive):
         nosearch = np.zeros(len(alive), bool)
         for i in np.nonzero(alive)[0]:
             day = env.state(int(i))[0]
-            nosearch[i] = day % 10 == 1 and env.made(int(i))[2] == day
+            nosearch[i] = (day % 10 == 1 and env.made(int(i))[2] == day) or (self.until > 0 and day > self.until)
         return {}, nosearch
 
     def after(self, env, i, a):
@@ -290,6 +293,7 @@ def main():
     p.add_argument("--record", default="", help="증류용 기록(npz) 경로: 탐색 조건의 모든 스텝 (관측, 행동, 후보별 Q, 보상)")
     p.add_argument("--no-toss-day-off", action="store_true", help="휴식일 버리기 금지 (두 조건 모두)")
     p.add_argument("--no-search-day-off", action="store_true", help="휴식일에는 탐색하지 않는다")
+    p.add_argument("--search-until", type=int, default=0, help="이 날까지만 탐색한다(다음 날부터 정책만). 0이면 끝까지")
     p.add_argument("--out", default="", help="게임별 최종 일차(JSON) 저장 경로: 짝 비교용")
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
@@ -305,7 +309,8 @@ def main():
     stats = {"searched": 0, "changed": 0, "rank": [0] * 5, "gain": [], "rollout_steps": 0}
     t0 = time.time()
     srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z, log=logs["search"], rec=rec,
-                ctl=NoSearchDayOff() if args.no_search_day_off else None, no_toss=args.no_toss_day_off)
+                ctl=NoSearchDayOff(args.search_until) if args.no_search_day_off or args.search_until else None,
+                no_toss=args.no_toss_day_off)
     ts_ = time.time() - t0
     if args.log:
         with open(args.log, "w") as f:
