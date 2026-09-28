@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 use towerswap_core::analysis::Board;
-use towerswap_core::env::{Env, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
+use towerswap_core::env::{Env, OpenRule, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_GRID_CH, N_SCALAR};
 use towerswap_core::expert::{greedy_set, greedy_set_with, invest_not_worse, params, path_not_worse, Params};
 use towerswap_core::kinds::Kind;
 use towerswap_core::rng::JsRng;
@@ -29,7 +29,7 @@ struct Slot {
     chest_bonus: [f32; 5],
     econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
     no_toss_day_off: bool,    // 휴식일 버리기 금지
-    no_open_normal: bool,     // 일반 상자 개봉 금지
+    open_rule: OpenRule,      // 상자 개봉 규칙
     practice: u8,            // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
@@ -71,7 +71,7 @@ impl Slot {
         self.env.chest_bonus = self.chest_bonus;
         (self.env.econ_w, self.env.econ_gamma) = self.econ;
         self.env.no_toss_day_off = self.no_toss_day_off;
-        self.env.no_open_normal = self.no_open_normal;
+        self.env.open_rule = self.open_rule;
         self.steps = 0;
     }
 }
@@ -230,6 +230,7 @@ struct Finished {
     tn_row: [[u32; 8]; 4],
     made_tw: [[u32; 5]; 5],
     made_tw_row: [[u32; 8]; 5],
+    emergency_opens: u32,
 }
 
 impl Finished {
@@ -263,6 +264,7 @@ impl Finished {
             tn_row: g.stat_tn_row,
             made_tw: g.stat_made,
             made_tw_row: g.stat_made_row,
+            emergency_opens: e.emergency_opens,
         }
     }
 }
@@ -294,9 +296,12 @@ impl VecEnv {
     /// n: 게임 수, seed: 시드, threads: 0이면 CPU 수, max_steps: 한 게임의 스텝 상한(안전장치),
     /// chest_bonus: 등급 1..4 상자를 게임에서 처음 만들 때의 보상 [b1, b2, b3, b4],
     /// econ_w, econ_gamma: 경제 조형 가중치(스왑 1개당, 0이면 끔)와 하루 할인(학습의 γ와 같게),
-    /// no_toss_day_off: 휴식일 버리기 금지, no_open_normal: 일반(1등급) 상자 개봉 금지 (둘 다 행동 마스크 제약)
+    /// no_toss_day_off: 휴식일 버리기 금지 (행동 마스크 제약),
+    /// 상자 개봉 규칙 (행동 마스크 제약): open_min_tier 미만 등급은 열 수 없다(no_open_normal=True는 open_min_tier=2와 같다).
+    /// emergency=(등급, 남은 스왑 상한, 하트 상한)이면 그 등급 상자는 스왑·하트가 상한 이하이고 지금 열 수 있는
+    /// open_min_tier 이상 상자가 없을 때만 열 수 있다
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false))]
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false, open_min_tier = 1, emergency = None))]
     fn new(
         n: usize,
         seed: u64,
@@ -307,7 +312,10 @@ impl VecEnv {
         econ_gamma: f32,
         no_toss_day_off: bool,
         no_open_normal: bool,
+        open_min_tier: u8,
+        emergency: Option<(u8, i64, i32)>,
     ) -> PyResult<Self> {
+        let open_rule = OpenRule { min_tier: open_min_tier.max(if no_open_normal { 2 } else { 1 }), emergency };
         let mut cb = [0.0f32; 5];
         if let Some(b) = chest_bonus {
             if b.len() != 4 {
@@ -330,7 +338,7 @@ impl VecEnv {
                     chest_bonus: cb,
                     econ: (econ_w, econ_gamma),
                     no_toss_day_off,
-                    no_open_normal,
+                    open_rule,
                     practice: 0,
                     aux: None,
                     aux_prep: false,
@@ -634,6 +642,7 @@ impl VecEnv {
                 d.set_item("tn_row", f.tn_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
                 d.set_item("made_tiers", f.made_tw.iter().map(|r| r[1..].to_vec()).collect::<Vec<_>>())?;
                 d.set_item("made_rows", f.made_tw_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
+                d.set_item("emergency_opens", f.emergency_opens)?;
                 Ok(d)
             })
             .collect()
@@ -655,7 +664,7 @@ impl VecEnv {
             slot.env.chest_bonus = slot.chest_bonus;
             (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
             slot.env.no_toss_day_off = slot.no_toss_day_off;
-            slot.env.no_open_normal = slot.no_open_normal;
+            slot.env.open_rule = slot.open_rule;
             slot.steps = 0;
             slot.practice = 0;
             slot.aux = None;

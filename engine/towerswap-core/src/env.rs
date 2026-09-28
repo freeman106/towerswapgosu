@@ -12,7 +12,8 @@
 //! - 대포 방향 전환은 대포마다 하루 1회
 //! - 휴식일 행동은 DAY_OFF_CAP개까지 (넘으면 하루 끝내기만 가능)
 //! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
-//! - 선택: 일반 상자 개봉 금지(`no_open_normal`, 기본 끔). 1등급 상자는 보관만 하고 동상자(2등급)부터 열 수 있다
+//! - 선택: 상자 개봉 규칙(`open_rule`, 기본 제한 없음). `min_tier` 미만 등급은 열 수 없고, 비상 예외로 지정한 등급만
+//!   남은 스왑·하트가 기준 이하이고 지금 열 수 있는 `min_tier` 이상 상자가 없을 때 열 수 있다(허용일 뿐 강제 개봉은 아니다)
 //! - TNT·요정 창의 취소는 막는다(상태가 그대로인 행동의 반복을 막는다). 요정은 가능한 이동이 있을 때만 쓸 수 있다.
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
@@ -125,6 +126,22 @@ fn econ_units(swaps: i64, n: &[u32; 5]) -> f32 {
     (swaps.max(0) + (1..=4).map(|t| n[t] as i64 * chest_swaps(t as u8)).sum::<i64>()) as f32
 }
 
+/// 상자 개봉 규칙. 기본은 제한 없음(min_tier 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OpenRule {
+    /// 평소 열 수 있는 최소 등급
+    pub min_tier: u8,
+    /// 비상 예외 (등급, 남은 스왑 상한, 하트 상한): 그 등급 상자는 스왑·하트가 상한 이하이고
+    /// 지금 열 수 있는 min_tier 이상 상자가 없을 때만 열 수 있다
+    pub emergency: Option<(u8, i64, i32)>,
+}
+
+impl Default for OpenRule {
+    fn default() -> Self {
+        OpenRule { min_tier: 1, emergency: None }
+    }
+}
+
 pub struct StepOut {
     pub reward: f32,
     pub done: bool,
@@ -145,8 +162,10 @@ pub struct Env {
     pub econ_gamma: f32,
     /// 휴식일 버리기 금지 (마스크와 step 모두)
     pub no_toss_day_off: bool,
-    /// 일반(1등급) 상자 개봉 금지 (마스크와 step 모두)
-    pub no_open_normal: bool,
+    /// 상자 개봉 규칙 (마스크와 step 모두)
+    pub open_rule: OpenRule,
+    /// 통계: 비상 예외로 연 상자 수
+    pub emergency_opens: u32,
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
@@ -185,7 +204,8 @@ impl Env {
             econ_w: 0.0,
             econ_gamma: 1.0,
             no_toss_day_off: false,
-            no_open_normal: false,
+            open_rule: OpenRule::default(),
+            emergency_opens: 0,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
@@ -230,6 +250,31 @@ impl Env {
         n[1..4].iter().any(|&c| c >= 3) && Board::of(&self.game).one_swap_chest_merges() != 0
     }
 
+    /// 상자 t를 개봉 규칙상 열 수 있는지 (원래 게임 규칙의 가능 여부는 따로 본다)
+    pub fn chest_rule_ok(&self, t: TileId) -> bool {
+        let (g, r) = (&self.game, &self.open_rule);
+        let tier = g.tiles[t].tier;
+        if tier >= r.min_tier {
+            return true;
+        }
+        match r.emergency {
+            Some((et, max_swaps, max_hearts)) if tier == et => {
+                g.swaps <= max_swaps && g.hearts <= max_hearts && !self.openable_chest_at_least(r.min_tier)
+            }
+            _ => false,
+        }
+    }
+
+    /// 지금 원래 게임 규칙으로 열 수 있는 `min` 등급 이상 상자가 보드에 있는지
+    fn openable_chest_at_least(&self, min: u8) -> bool {
+        let g = &self.game;
+        (1..=ROWS as i32).any(|y| {
+            (1..=COLS as i32).any(|x| {
+                g.tile_at(x, y).map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= min) && g.tap_valid(x, y)
+            })
+        })
+    }
+
     /// 이 게임에서 만든 가장 높은 상자 등급 (없으면 0)
     pub fn max_chest_tier(&self) -> u8 {
         (1..=4).rev().find(|&t| self.chest_seen & (1 << t) != 0).unwrap_or(0)
@@ -249,7 +294,7 @@ impl Env {
         let t = g.tile_at(x, y).unwrap();
         match g.tiles[t].kind {
             Kind::Cannon => !self.flipped_today.contains(&t),
-            Kind::Chest => !(self.no_open_normal && g.tiles[t].tier <= 1),
+            Kind::Chest => self.chest_rule_ok(t),
             Kind::Fairy | Kind::FairyHouse => *fairy_ok.get_or_insert_with(|| g.fairy_any_move()),
             _ => true,
         }
@@ -383,6 +428,18 @@ impl Env {
     }
 
     fn apply(&mut self, a: usize) -> bool {
+        // 상자 개봉 규칙: 낮의 상자 탭만 해당 (허용되지 않으면 무효, 비상 예외로 열면 센다)
+        let mut emergency = false;
+        if (A_CELL..A_YES).contains(&a) && matches!(self.game.phase, Phase::Idle | Phase::Dusk) {
+            let c = a - A_CELL;
+            let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
+            if let Some(t) = self.game.tile_at(x, y).filter(|&t| self.game.tiles[t].kind == Kind::Chest) {
+                if !self.chest_rule_ok(t) {
+                    return false;
+                }
+                emergency = self.game.tiles[t].tier < self.open_rule.min_tier;
+            }
+        }
         let g = &mut self.game;
         let r = if a < A_CELL {
             let c = (a - A_DRAG) / 4;
@@ -396,9 +453,6 @@ impl Env {
             let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
             match g.phase {
                 Phase::Idle | Phase::Dusk => {
-                    if self.no_open_normal && g.tile_at(x, y).map_or(false, |t| g.tiles[t].kind == Kind::Chest && g.tiles[t].tier <= 1) {
-                        return false;
-                    }
                     let cannon = g.tile_at(x, y).filter(|&t| g.tiles[t].kind == Kind::Cannon);
                     if cannon.map_or(false, |t| self.flipped_today.contains(&t)) {
                         return false;
@@ -406,6 +460,7 @@ impl Env {
                     let r = g.tap(x, y);
                     if r == ActionResult::Ok {
                         self.flipped_today.extend(cannon);
+                        self.emergency_opens += emergency as u32;
                     }
                     r
                 }

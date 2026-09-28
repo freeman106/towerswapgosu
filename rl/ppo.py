@@ -46,7 +46,10 @@ def parse_args():
     p.add_argument("--econ-shaping", type=float, default=0.0,
                    help="퍼텐셜 기반 경제 조형의 스왑 1개당 가중치 w: Φ = w·(남은 스왑 + 보드 상자의 개봉 스왑), 0이면 끔")
     p.add_argument("--no-toss-day-off", type=int, default=0, help="1이면 휴식일 버리기 금지 (행동 마스크 제약)")
-    p.add_argument("--no-open-normal", type=int, default=0, help="1이면 일반(1등급) 상자 개봉 금지, 동상자부터 연다 (행동 마스크 제약)")
+    p.add_argument("--no-open-normal", type=int, default=0, help="1이면 일반(1등급) 상자 개봉 금지, 동상자부터 연다 (--open-min-tier 2와 같음)")
+    p.add_argument("--open-min-tier", type=int, default=1, help="평소 열 수 있는 최소 상자 등급 (행동 마스크 제약, 1이면 제한 없음)")
+    p.add_argument("--emergency", default="", help="비상 예외 '등급,스왑 상한,하트 상한' (예: 2,0,5): 그 등급 상자는 스왑·하트가 상한 이하이고 "
+                                                   "지금 열 수 있는 최소 등급 이상 상자가 없을 때만 열 수 있다. 비우면 없음")
     p.add_argument("--start-level", default="", help="연습 시작 상태의 난이도 목록, 예: 1,2 (1: 교환 한 번이면 상자 합성, 2: 두 번, "
                                                         "3: 같은 등급 상자 3개, 4: 2개). 비우면 없음")
     p.add_argument("--start-pool", type=int, default=4000, help="연습 시작 상태 수 (난이도마다 나눈다)")
@@ -149,7 +152,7 @@ class RunningStd:
 SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "r_boss", "r_chest", "r_econ",
                 "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
                 "chest_ge2", "chest_ge3", "chest_ge4", "hold1_steps", "hold1_days", "max_held1",
-                "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3"]
+                "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3", "emergency"]
 PRACTICE_STATS = ("episodes", "success_path", "success_day", "ready_no_merge", "merge_take", "made2")
 PRACTICE_KEYS = [f"p{lv}_{k}" for lv in (1, 2, 3, 4) for k in PRACTICE_STATS]
 
@@ -179,6 +182,7 @@ def episode_summary(fin):
     steps = col("steps").sum()
     s["hold2_frac"], s["hold3_frac"] = col("steps_hold2").sum() / steps, col("steps_hold3").sum() / steps
     s["games_hold2"], s["games_hold3"] = (col("max_same_held") >= 2).mean(), (col("max_same_held") >= 3).mean()
+    s["emergency"] = col("emergency_opens").mean()
     return s
 
 
@@ -216,10 +220,15 @@ def format_summary(s):
     return (f"게임 {s['episodes']} 점수 {s['score']:.0f} day {s['day']:.2f}(최대 {s['day_max']:.0f}) | "
             f"보상 생존 {s['r_survival']:.3f} 보스 {s['r_boss']:.2f} 상자 {s['r_chest']:.2f} 경제 {s['r_econ']:.2f} | "
             f"상자 생성 {s['made1']:.2f}/{s['made2']:.2f}/{s['made3']:.2f}/{s['made4']:.2f} "
-            f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f} | "
+            f"개봉 {s['opened1']:.2f}/{s['opened2']:.2f}/{s['opened3']:.2f}/{s['opened4']:.2f} (비상 {s['emergency']:.2f}) | "
             f"일반 보관 {s['hold1_steps']:.1f}행동·{s['hold1_days']:.2f}일, 최대 보유 {s['max_held1']:.2f}, "
             f"같은 등급 2개+ 보유 {s['hold2_frac']:.1%}(게임 {s['games_hold2']:.0%}) 3개+ {s['hold3_frac']:.2%}(게임 {s['games_hold3']:.0%}), "
             f"합성 기회 {s['merge_opps']:.2f}·선택 {s['merge_take']:.0%}")
+
+
+def parse_emergency(text):
+    """'등급,스왑 상한,하트 상한' → (int, int, int), 비우면 None"""
+    return tuple(int(x) for x in text.split(",")) if text else None
 
 
 def masked_dist(logits, mask):
@@ -237,7 +246,8 @@ def main():
     chest_bonus = [float(x) for x in args.chest_bonus.split(",")] if args.chest_bonus else None
     env = ts.VecEnv(N, seed=args.seed, threads=args.threads, chest_bonus=chest_bonus,
                     econ_w=args.econ_shaping, econ_gamma=args.gamma,
-                    no_toss_day_off=bool(args.no_toss_day_off), no_open_normal=bool(args.no_open_normal))
+                    no_toss_day_off=bool(args.no_toss_day_off), no_open_normal=bool(args.no_open_normal),
+                    open_min_tier=args.open_min_tier, emergency=parse_emergency(args.emergency))
     levels = [int(x) for x in args.start_level.split(",")] if args.start_level else []
     aux_levels = [int(x) for x in args.aux_levels.split(",")] if args.aux_coef > 0 else []
     if levels:
