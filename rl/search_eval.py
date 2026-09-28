@@ -114,6 +114,7 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
     frames: 리플레이용 기록(게임별 목록, 행동 직전 상태·보드·고른 행동·정책 상위 행동·탐색 후보),
     env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다,
     ctl: 행동 개입. ctl.before(env, alive) → (게임 → 강제 행동, 탐색 안 할 게임 bool 배열), ctl.after(env, i, 행동)은 행동 직전에 호출,
+    ctl.choose(env, alive, logits, noise, act)가 있으면 정책 로짓·샘플링 잡음을 보고 강제 행동(dict)을 더 고른다,
     no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용), no_open: 일반 상자 개봉 금지,
     fin_rec: 목록을 주면 게임별 종료 기록(pop_finished의 dict)을 모은다,
     env_kw: 새로 만드는 VecEnv에 더 넘길 인자(예: open_min_tier, emergency). frames[i]가 None인 게임은 프레임을 기록하지 않는다"""
@@ -146,9 +147,12 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
         if search and step % 50 == 0:
             print(f"  [탐색] 스텝 {step} · 진행 중 {alive.sum()}판 · {time.time() - t_start:.0f}s", flush=True)
         logits, _ = pol(grid, scal, mask)
-        act = (logits + np.random.default_rng([seed, step]).gumbel(size=(n, A))).argmax(1)
+        noise = np.random.default_rng([seed, step]).gumbel(size=(n, A))
+        act = (logits + noise).argmax(1)
         base_act = act.copy()
         forced, nosearch = ctl.before(env, alive) if ctl else ({}, np.zeros(n, bool))
+        if ctl is not None and hasattr(ctl, "choose"):
+            forced.update(ctl.choose(env, alive, logits, noise, act))
         for i in forced:
             nosearch[i] = True
         info = {}  # 게임 → (후보, 후보별 평균 Q, 기본 대비 차이 평균, 표준오차)
