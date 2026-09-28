@@ -53,12 +53,12 @@ class Stage1:
             self.snap[i][k] = snapshot(env, i, cells, tur, hearts)
 
 
-def run(pol, n, seed, hold, k, place, rule, pool_seed, frames=None):
+def run(pol, n, seed, hold, k, place, rule, pool_seed, frames=None, ctl=None):
     env = ts.VecEnv(n, seed=seed, no_toss_day_off=True, **rule)
     env.add_starts(hold, np.arange(k, dtype=np.int64), SILVER_LEVEL, place_tier=place, seed=pool_seed)
     env.set_start_frac(1.0)
     env.reset(np.zeros((n, C, H, W), np.float32), np.zeros((n, S), np.float32), np.zeros((n, A), bool))
-    c, fins = Stage1(n), []
+    c, fins = ctl or Stage1(n), []
     fin = play(pol, n, seed, False, 0, 0, 0, None, env=env, ctl=c, fin_rec=fins, frames=frames)
     fins.sort(key=lambda f: f["env"])
     return fin, fins, c

@@ -10,7 +10,10 @@ use towerswap_core::env::{Env, OpenRule, GRID_H, GRID_LEN, GRID_W, N_ACTIONS, N_
 use towerswap_core::expert::{greedy_set, greedy_set_with, invest_not_worse, params, path_not_worse, Params};
 use towerswap_core::kinds::Kind;
 use towerswap_core::rng::JsRng;
-use towerswap_core::{Game, Phase};
+use towerswap_core::{Dir, Game, Phase};
+
+/// 드래그 행동 번호의 끝 (0..168)
+const A_DRAG_END: usize = 168;
 
 fn splitmix(s: &mut u64) -> u64 {
     *s = s.wrapping_add(0x9E3779B97F4A7C15);
@@ -723,6 +726,38 @@ impl VecEnv {
     fn board(&self, i: usize) -> (Vec<Vec<String>>, Vec<String>) {
         let g = &self.slots[i].env.game;
         (g.board_cells(), g.turret_cells())
+    }
+
+    /// 게임 i의 지금 상태에서 드래그 행동(0..168)마다 복제본에 적용해 본 결과를 out[행동]에 쓴다(게임은 바뀌지 않는다).
+    /// 열: 0..4 무기(화살탑·발리스타·대포) 등급 1..4 생성 수, 4 얼음벽 생성 수, 5 상자 합성(2등급 이상 상자 생성) 수,
+    /// 6 버리기 여부, 7 성 보수로 얻은 하트. 무효한 드래그는 모든 열이 -1. 생성 수는 엔진 통계(연쇄 포함, 이동은 세지 않음)
+    fn drag_outcomes(&self, i: usize, mut out: PyReadwriteArrayDyn<'_, i32>) -> PyResult<()> {
+        let o = out.as_slice_mut().map_err(|e| PyValueError::new_err(format!("out: {e}")))?;
+        if o.len() != A_DRAG_END * 8 {
+            return Err(PyValueError::new_err(format!("out: 길이 {} (기대 {})", o.len(), A_DRAG_END * 8)));
+        }
+        let env = &self.slots[i].env;
+        let g0 = &env.game;
+        for a in 0..A_DRAG_END {
+            let row = &mut o[a * 8..a * 8 + 8];
+            let c = a / 4;
+            let (x, y, dir) = ((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4));
+            let toss = g0.drag_is_toss(x, y, dir);
+            let mut e = env.clone();
+            if e.step(a).is_none() {
+                row.fill(-1);
+                continue;
+            }
+            let g = &e.game;
+            for t in 1..=4 {
+                row[t - 1] = (0..3).map(|k| (g.stat_made[k][t] - g0.stat_made[k][t]) as i32).sum();
+            }
+            row[4] = (1..=4).map(|t| (g.stat_made[3][t] - g0.stat_made[3][t]) as i32).sum();
+            row[5] = (2..=4).map(|t| (g.chest_made[t] - g0.chest_made[t]) as i32).sum();
+            row[6] = toss as i32;
+            row[7] = if g.day == g0.day { (g.hearts - g0.hearts).max(0) } else { 0 };
+        }
+        Ok(())
     }
 
     /// 게임 i의 지금까지 만들어진 방어물: (종류 5 × 결과 등급 1..4, 종류 5 × 결과 행 0..7), 휴식일 번호
