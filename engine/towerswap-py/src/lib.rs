@@ -231,6 +231,7 @@ struct Finished {
     made_tw: [[u32; 5]; 5],
     made_tw_row: [[u32; 8]; 5],
     emergency_opens: u32,
+    start_day: i32,
 }
 
 impl Finished {
@@ -265,6 +266,7 @@ impl Finished {
             made_tw: g.stat_made,
             made_tw_row: g.stat_made_row,
             emergency_opens: e.emergency_opens,
+            start_day: e.start_day(),
         }
     }
 }
@@ -643,9 +645,28 @@ impl VecEnv {
                 d.set_item("made_tiers", f.made_tw.iter().map(|r| r[1..].to_vec()).collect::<Vec<_>>())?;
                 d.set_item("made_rows", f.made_tw_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
                 d.set_item("emergency_opens", f.emergency_opens)?;
+                d.set_item("start_day", f.start_day)?;
                 Ok(d)
             })
             .collect()
+    }
+
+    /// 탐색 환경 슬롯 src의 게임들을 연습 시작 상태(난이도 level)로 풀에 더한다. place_tier > 0이면 보드의 1~6행 자원 타일 하나를
+    /// 그 등급 상자로 바꾼다(seed로 고르고, 자원이 없는 상태는 건너뛴다). 더한 수를 돌려준다. 풀을 쓰려면 set_start_frac으로 비율을 정한다
+    #[pyo3(signature = (search, src, level, place_tier = 0, seed = 1))]
+    fn add_starts(&mut self, search: PyRef<'_, SearchEnv>, src: PyReadonlyArray1<'_, i64>, level: u8, place_tier: u8, seed: u64) -> PyResult<usize> {
+        let mut rng = seed;
+        let mut added = 0;
+        for &j in src.as_slice()? {
+            let slot = search.slots.get(j as usize).ok_or_else(|| PyValueError::new_err(format!("add_starts: 슬롯 {j} 범위 밖")))?;
+            let mut g = slot.env.game.clone();
+            if place_tier > 0 && g.replace_resource_with_chest(place_tier, splitmix(&mut rng)).is_none() {
+                continue;
+            }
+            self.starts.push(Start { game: g, level, merge: None });
+            added += 1;
+        }
+        Ok(added)
     }
 
     /// 탐색 환경 슬롯 src[j]의 게임을 게임 dst[j]로 가져온다(되돌린 상태에서 이어 두기용). 연습 시작·보조 대상은 지운다.

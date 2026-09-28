@@ -1005,6 +1005,29 @@ impl Game {
         self.drag_plan(x, y, dir).is_some()
     }
 
+    /// 연습 시작 상태용: 1~6행의 자원 타일(나무·돌·철·보물·얼음 조각) 중 `pick % 후보 수`번째를 `tier` 등급 상자로 바꾼다.
+    /// 바꾼 칸 (x, y)를 돌려준다. 후보가 없으면 None
+    pub fn replace_resource_with_chest(&mut self, tier: u8, pick: u64) -> Option<(i32, i32)> {
+        let cand: Vec<TileId> = (1..=6)
+            .flat_map(|y| (1..=COLS as i32).map(move |x| (x, y)))
+            .filter_map(|(x, y)| self.tile_at(x, y))
+            .filter(|&t| matches!(self.tiles[t].kind, Kind::Wood | Kind::Stone | Kind::Iron | Kind::Treasure | Kind::IceCube))
+            .collect();
+        if cand.is_empty() {
+            return None;
+        }
+        let t = cand[(pick % cand.len() as u64) as usize];
+        let (steps, day) = (self.stat_steps, self.day);
+        let tile = &mut self.tiles[t];
+        tile.kind = Kind::Chest;
+        tile.tier = tier;
+        tile.frame = 1;
+        tile.dynamite = 0;
+        tile.flipped = false;
+        tile.born = (steps, day);
+        Some((tile.gx, tile.gy))
+    }
+
     /// 드래그가 버리기(§5.3 d)인지 (상태 변화 없음)
     pub fn drag_is_toss(&self, x: i32, y: i32, dir: Dir) -> bool {
         matches!(self.drag_plan(x, y, dir), Some((_, DragPlan::Toss)))

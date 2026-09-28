@@ -50,6 +50,13 @@ def parse_args():
     p.add_argument("--open-min-tier", type=int, default=1, help="평소 열 수 있는 최소 상자 등급 (행동 마스크 제약, 1이면 제한 없음)")
     p.add_argument("--emergency", default="", help="비상 예외 '등급,스왑 상한,하트 상한' (예: 2,0,5): 그 등급 상자는 스왑·하트가 상한 이하이고 "
                                                    "지금 열 수 있는 최소 등급 이상 상자가 없을 때만 열 수 있다. 비우면 없음")
+    p.add_argument("--silver-starts", type=int, default=0,
+                   help="은상자 연습(난이도 6) 시작 상태 수: --pool-ckpt 정책이 실제로 둔 게임의 낮 상태에서 1~6행 자원 하나를 은상자로 바꾼다. "
+                        "--start-frac 비율로 새 게임을 이 풀에서 시작한다(연습 게임도 끝까지 둔다)")
+    p.add_argument("--pool-ckpt", default="", help="연습 상태를 모을 정책 (비우면 --init)")
+    p.add_argument("--pool-games", type=int, default=512)
+    p.add_argument("--pool-seed", type=int, default=99)
+    p.add_argument("--pool-open-min-tier", type=int, default=2, help="연습 상태를 모을 때의 개봉 규칙 최소 등급")
     p.add_argument("--start-level", default="", help="연습 시작 상태의 난이도 목록, 예: 1,2 (1: 교환 한 번이면 상자 합성, 2: 두 번, "
                                                         "3: 같은 등급 상자 3개, 4: 2개). 비우면 없음")
     p.add_argument("--start-pool", type=int, default=4000, help="연습 시작 상태 수 (난이도마다 나눈다)")
@@ -153,6 +160,7 @@ SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "
                 "made1", "made2", "made3", "made4", "opened1", "opened2", "opened3", "opened4",
                 "chest_ge2", "chest_ge3", "chest_ge4", "hold1_steps", "hold1_days", "max_held1",
                 "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3", "emergency"]
+SILVER_LEVEL = 6  # 은상자 연습 시작의 난이도 번호
 PRACTICE_STATS = ("episodes", "success_path", "success_day", "ready_no_merge", "merge_take", "made2")
 PRACTICE_KEYS = [f"p{lv}_{k}" for lv in (1, 2, 3, 4) for k in PRACTICE_STATS]
 
@@ -257,6 +265,17 @@ def main():
                                  confirm_samples=args.aux_confirm if lv in aux_levels else 0, append=i > 0)
         env.set_start_frac(args.start_frac)
         print(f"연습 시작 상태 {env.start_pool_info()} (난이도 {levels}, {time.time() - t0:.0f}s), 비율 {args.start_frac}")
+    if args.silver_starts:
+        from search_eval import Policy
+        from starts import capture, describe
+        t0 = time.time()
+        pool_pol = Policy(args.pool_ckpt or args.init, dev)
+        hold, k, info = capture(pool_pol, args.pool_games, args.pool_seed, args.silver_starts,
+                                env_kw={"open_min_tier": args.pool_open_min_tier})
+        added = env.add_starts(hold, np.arange(k, dtype=np.int64), SILVER_LEVEL, place_tier=3, seed=args.pool_seed)
+        env.set_start_frac(args.start_frac)
+        print(f"은상자 연습 시작 상태 {added}개: {describe(info)} ({time.time() - t0:.0f}s), 비율 {args.start_frac}", flush=True)
+        del pool_pol, hold
     grid = np.zeros((N, C, H, W), np.float32)
     scal = np.zeros((N, S), np.float32)
     mask = np.zeros((N, A), bool)
@@ -424,6 +443,11 @@ def main():
                 if ps:
                     pr += (f" | 연습{lv} {ps['episodes']}게임 성공 {ps['success_path']:.0%}(당일 {ps['success_day']:.0%}) "
                            f"기회만 {ps['ready_no_merge']:.0%} 동 {ps['made2']:.0%}")
+            sv = [f for f in ep_hist if f["practice_level"] == SILVER_LEVEL]
+            if sv:
+                op = np.array([f["opened"][2] + f["opened"][3] for f in sv])
+                pr += (f" | 은상자 연습 {len(sv)}게임 개봉 {np.mean(op >= 1):.0%}·둘째 {np.mean(op >= 2):.0%} "
+                       f"이후 생존 {np.mean([f['day'] - f['start_day'] for f in sv]):.1f}일")
             print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 정상 시작 "
                   f"{format_summary(episode_summary([f for f in ep_hist if not f['practice']]))}{pr} | "
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}"

@@ -250,6 +250,11 @@ impl Env {
         n[1..4].iter().any(|&c| c >= 3) && Board::of(&self.game).one_swap_chest_merges() != 0
     }
 
+    /// 이 에피소드를 시작한 날
+    pub fn start_day(&self) -> i32 {
+        self.start_day
+    }
+
     /// 상자 t를 개봉 규칙상 열 수 있는지 (원래 게임 규칙의 가능 여부는 따로 본다)
     pub fn chest_rule_ok(&self, t: TileId) -> bool {
         let (g, r) = (&self.game, &self.open_rule);

@@ -128,6 +128,8 @@ def report(title, fin, fins, c, games, n):
           f"30일 보스 통과 {np.mean(fin > 30):.1%} · 35일 도달 {np.mean(fin >= 35):.1%} · 40일 도달 {np.mean(fin >= 40):.1%}")
     print(f"  상자 생성/개봉 (게임당, 일반·동·은·금): {' · '.join(f'{m:.2f}/{o:.2f}' for m, o in zip(made.mean(0), opened.mean(0)))} | "
           f"비상 동상자 개봉 {emerg.mean():.2f}/게임 (쓴 게임 {np.mean(emerg > 0):.0%})")
+    opps, taken = sum(f["merge_opps"] for f in fins), sum(f["merge_taken"] for f in fins)
+    print(f"  상자 합성 기회(교환 한 번으로 합성 가능한 입력 대기 상태) {opps / n:.2f}/게임 · 그중 합성을 고른 비율 {taken / max(opps, 1):.0%}")
     if RULE_MIN > 2:
         em_days = np.array([d for o in c.opens for _, d, t in o if t < RULE_MIN])
         if len(em_days):
