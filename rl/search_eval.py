@@ -148,14 +148,15 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
         info = {}  # 게임 → (후보, 후보별 평균 Q, 기본 대비 차이 평균, 표준오차)
         if search:
             # 후보: 기본 행동, 확률 상위 k개, 그 밖의 유효 행동 r개
-            rng = np.random.default_rng([seed, step, 11])
+            # 무작위 후보는 게임별 난수 행(판·스텝마다 고정)으로 고른다: 다른 게임의 상태·개입이 이 게임의 후보를 바꾸지 않는다
+            keys = np.random.default_rng([seed, step, 11]).random((n, A))
             idx, first, which = [], [], []
             for i in np.nonzero(alive & (mask.sum(1) >= 2) & ~nosearch)[0]:
                 valid = np.nonzero(mask[i])[0]
                 top = valid[np.argsort(-logits[i, valid])[:k]]
                 cand = [int(act[i])] + [int(a) for a in top if a != act[i]]
-                rest = [a for a in valid if a not in cand]
-                cand += [int(a) for a in rng.choice(rest, size=min(r, len(rest)), replace=False)]
+                rest = np.array([a for a in valid if a not in cand], np.int64)
+                cand += [int(a) for a in rest[np.argsort(keys[i, rest])[:r]]]
                 for c in cand:
                     for j in range(s):
                         idx.append(i)
@@ -289,6 +290,7 @@ def main():
     p.add_argument("--record", default="", help="증류용 기록(npz) 경로: 탐색 조건의 모든 스텝 (관측, 행동, 후보별 Q, 보상)")
     p.add_argument("--no-toss-day-off", action="store_true", help="휴식일 버리기 금지 (두 조건 모두)")
     p.add_argument("--no-search-day-off", action="store_true", help="휴식일에는 탐색하지 않는다")
+    p.add_argument("--out", default="", help="게임별 최종 일차(JSON) 저장 경로: 짝 비교용")
     p.add_argument("--seed", type=int, default=12345)
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
@@ -308,6 +310,9 @@ def main():
     if args.log:
         with open(args.log, "w") as f:
             json.dump({"final": {"base": base.tolist(), "search": srch.tolist()}, **logs}, f, ensure_ascii=False)
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump({"base": base.tolist(), "search": srch.tolist()}, f)
     if rec is not None:
         np.savez_compressed(args.record, final=srch, sigma=pol.sigma, gamma=pol.gamma, z=args.z,
                             **{k_: np.array(v) for k_, v in rec.items()})
