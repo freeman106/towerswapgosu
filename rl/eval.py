@@ -16,6 +16,8 @@ def main():
     p.add_argument("--envs", type=int, default=256)
     p.add_argument("--mode", default="argmax", choices=["argmax", "sample"])
     p.add_argument("--seed", type=int, default=12345)
+    p.add_argument("--no-toss-day-off", action="store_true", help="휴식일 버리기 금지")
+    p.add_argument("--no-open-normal", action="store_true", help="일반(1등급) 상자 개봉 금지")
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
     dev = torch.device(args.device)
@@ -26,7 +28,7 @@ def main():
     agent.eval()
 
     N = args.envs
-    env = ts.VecEnv(N, seed=args.seed)
+    env = ts.VecEnv(N, seed=args.seed, no_toss_day_off=args.no_toss_day_off, no_open_normal=args.no_open_normal)
     grid = np.zeros((N, C, H, W), np.float32)
     scal = np.zeros((N, S), np.float32)
     mask = np.zeros((N, A), bool)

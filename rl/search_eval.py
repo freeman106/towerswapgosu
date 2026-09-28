@@ -108,15 +108,15 @@ class NoSearchDayOff:
         pass
 
 
-def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None, ctl=None, no_toss=False):
+def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None, ctl=None, no_toss=False, no_open=False):
     """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝),
     frames: 리플레이용 기록(게임별 목록, 행동 직전 상태·보드·고른 행동·정책 상위 행동·탐색 후보),
     env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다,
     ctl: 행동 개입. ctl.before(env, alive) → (게임 → 강제 행동, 탐색 안 할 게임 bool 배열), ctl.after(env, i, 행동)은 행동 직전에 호출,
-    no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용)"""
+    no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용), no_open: 일반 상자 개봉 금지"""
     fresh = env is None
     if fresh:
-        env = ts.VecEnv(n, seed=seed, no_toss_day_off=no_toss)
+        env = ts.VecEnv(n, seed=seed, no_toss_day_off=no_toss, no_open_normal=no_open)
     grid = np.zeros((n, C, H, W), np.float32)
     scal = np.zeros((n, S), np.float32)
     mask = np.zeros((n, A), bool)
@@ -293,6 +293,7 @@ def main():
     p.add_argument("--record", default="", help="증류용 기록(npz) 경로: 탐색 조건의 모든 스텝 (관측, 행동, 후보별 Q, 보상)")
     p.add_argument("--no-toss-day-off", action="store_true", help="휴식일 버리기 금지 (두 조건 모두)")
     p.add_argument("--no-search-day-off", action="store_true", help="휴식일에는 탐색하지 않는다")
+    p.add_argument("--no-open-normal", action="store_true", help="일반(1등급) 상자 개봉 금지 (두 조건 모두)")
     p.add_argument("--search-until", type=int, default=0, help="이 날까지만 탐색한다(다음 날부터 정책만). 0이면 끝까지")
     p.add_argument("--out", default="", help="게임별 최종 일차(JSON) 저장 경로: 짝 비교용")
     p.add_argument("--seed", type=int, default=12345)
@@ -304,13 +305,13 @@ def main():
     logs = {c: {"dec": [], "dusk": [], "morning": []} for c in ("base", "search")} if args.log else {"base": None, "search": None}
     rec = {k_: [] for k_ in ("game", "grid", "scal", "mask", "act", "cands", "qmean", "dmean", "dsem", "searched", "rew", "days", "done")} if args.record else None
     t0 = time.time()
-    base = play(pol, args.games, args.seed, False, 0, 0, 0, None, log=logs["base"], no_toss=args.no_toss_day_off)
+    base = play(pol, args.games, args.seed, False, 0, 0, 0, None, log=logs["base"], no_toss=args.no_toss_day_off, no_open=args.no_open_normal)
     tb = time.time() - t0
     stats = {"searched": 0, "changed": 0, "rank": [0] * 5, "gain": [], "rollout_steps": 0}
     t0 = time.time()
     srch = play(pol, args.games, args.seed, True, args.k, args.r, args.s, stats, args.z, log=logs["search"], rec=rec,
                 ctl=NoSearchDayOff(args.search_until) if args.no_search_day_off or args.search_until else None,
-                no_toss=args.no_toss_day_off)
+                no_toss=args.no_toss_day_off, no_open=args.no_open_normal)
     ts_ = time.time() - t0
     if args.log:
         with open(args.log, "w") as f:
