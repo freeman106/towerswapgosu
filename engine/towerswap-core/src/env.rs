@@ -14,6 +14,9 @@
 //! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
 //! - 선택: 상자 개봉 규칙(`open_rule`, 기본 제한 없음). `min_tier` 미만 등급은 열 수 없고, 비상 예외로 지정한 등급만
 //!   남은 스왑·하트가 기준 이하이고 지금 열 수 있는 `min_tier` 이상 상자가 없을 때 열 수 있다(허용일 뿐 강제 개봉은 아니다)
+//! - 선택: 합성 우선(`merge_rule = (남은 스왑 하한, 하루 최대 횟수)`, 기본 끔). 은상자 이상을 연 날 입력 대기에서 남은 스왑이 하한 이상이고
+//!   오늘 이 규칙으로 제한한 결정이 최대 횟수 미만이면, 기본→동 무기 합성 드래그(복제본에 적용해 동 무기가 생기고 은 이상은 안 생기는 수)가
+//!   있을 때 행동을 그 드래그로 제한한다(마스크와 step 모두)
 //! - TNT·요정 창의 취소는 막는다(상태가 그대로인 행동의 반복을 막는다). 요정은 가능한 이동이 있을 때만 쓸 수 있다.
 //!
 //! 보상 = 앱 점수 증가분 / 100 (하루 생존 +0.01, 보스 통과 +10). 한 스텝에 지난 날 수를 `days`로 알려 준다(하루 단위 할인용).
@@ -126,6 +129,16 @@ fn econ_units(swaps: i64, n: &[u32; 5]) -> f32 {
     (swaps.max(0) + (1..=4).map(|t| n[t] as i64 * chest_swaps(t as u8)).sum::<i64>()) as f32
 }
 
+/// 합성 우선 규칙의 판정 캐시 (스레드 사이에 공유될 수 있어 뮤텍스, 복제하면 내용을 복사한다)
+#[derive(Default)]
+struct MergeCache(std::sync::Mutex<Option<((u64, i32), Vec<usize>)>>);
+
+impl Clone for MergeCache {
+    fn clone(&self) -> Self {
+        MergeCache(std::sync::Mutex::new(self.0.lock().unwrap().clone()))
+    }
+}
+
 /// 상자 개봉 규칙. 기본은 제한 없음(min_tier 1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OpenRule {
@@ -166,6 +179,13 @@ pub struct Env {
     pub open_rule: OpenRule,
     /// 통계: 비상 예외로 연 상자 수
     pub emergency_opens: u32,
+    /// 합성 우선 규칙 (남은 스왑 하한, 하루 최대 횟수)
+    pub merge_rule: Option<(i64, u32)>,
+    silver_open_day: i32,    // 은상자 이상을 연 날 (없으면 0)
+    merge_forced_today: u32, // 오늘 합성 우선 규칙으로 제한한 결정 수
+    merge_cache: MergeCache, // 합성 우선 규칙의 합성 드래그 목록 캐시 (상태 키: 행동 수, 날)
+    /// 통계: 합성 우선 규칙으로 제한한 결정 수
+    pub merge_rule_uses: u32,
     chest_seen: u8, // 이 게임에서 보드에 나타난 상자 등급 (비트)
     /// 이 게임의 보상 성분별 합계: 생존(하루 0.01), 보스(10), 상자 최초 생성 보너스
     pub ep_survival: f32,
@@ -206,6 +226,11 @@ impl Env {
             no_toss_day_off: false,
             open_rule: OpenRule::default(),
             emergency_opens: 0,
+            merge_rule: None,
+            silver_open_day: 0,
+            merge_forced_today: 0,
+            merge_cache: MergeCache::default(),
+            merge_rule_uses: 0,
             chest_seen: 0,
             ep_survival: 0.0,
             ep_boss: 0.0,
@@ -253,6 +278,51 @@ impl Env {
     /// 이 에피소드를 시작한 날
     pub fn start_day(&self) -> i32 {
         self.start_day
+    }
+
+    /// 드래그 a가 기본→동 무기 합성을 만드는지 (합성 우선 규칙을 끈 복제본에 적용해 본다)
+    pub fn drag_makes_bronze(&self, a: usize) -> bool {
+        let c = a / 4;
+        if a >= A_CELL || !self.game.drag_valid((c % COLS) as i32 + 1, (c / COLS) as i32 + 1, Dir::from_index(a % 4)) {
+            return false;
+        }
+        let mut e = self.clone();
+        e.merge_rule = None;
+        if e.step(a).is_none() {
+            return false;
+        }
+        let (g0, g) = (&self.game, &e.game);
+        let made = |t: usize| (0..3).map(|k| g.stat_made[k][t] - g0.stat_made[k][t]).sum::<u32>();
+        made(2) > 0 && made(3) == 0 && made(4) == 0
+    }
+
+    /// 합성 우선 규칙의 조건(은상자 연 날, 입력 대기, 스왑 하한, 오늘 횟수)이 맞는지. 합성 드래그 존재 여부는 따로 본다
+    fn merge_rule_on(&self) -> bool {
+        let g = &self.game;
+        match self.merge_rule {
+            Some((min_swaps, max_k)) => {
+                g.phase == Phase::Idle && self.silver_open_day == g.day && g.swaps >= min_swaps && self.merge_forced_today < max_k
+            }
+            None => false,
+        }
+    }
+
+    /// 합성 우선 규칙이 지금 행동을 제한하면 허용되는 드래그 목록 (규칙이 꺼져 있거나 합성 드래그가 없으면 None)
+    pub fn merge_rule_set(&self) -> Option<Vec<usize>> {
+        if !self.merge_rule_on() {
+            return None;
+        }
+        let key = (self.game.stat_steps, self.game.day);
+        let set = match &*self.merge_cache.0.lock().unwrap() {
+            Some((k, set)) if *k == key => Some(set.clone()),
+            _ => None,
+        };
+        let set = set.unwrap_or_else(|| {
+            let set: Vec<usize> = (0..A_CELL).filter(|&a| self.drag_makes_bronze(a)).collect();
+            *self.merge_cache.0.lock().unwrap() = Some((key, set.clone()));
+            set
+        });
+        (!set.is_empty()).then_some(set)
     }
 
     /// 상자 t를 개봉 규칙상 열 수 있는지 (원래 게임 규칙의 가능 여부는 따로 본다)
@@ -331,6 +401,12 @@ impl Env {
                     m[cell_action(x, y)] = self.tap_ok(x, y, &mut fairy_ok);
                 }
                 m[A_END_DAY] = g.phase == Phase::Dusk || closed;
+                if let Some(set) = self.merge_rule_set() {
+                    m.fill(false);
+                    for a in set {
+                        m[a] = true;
+                    }
+                }
             }
             Phase::DayOffOffer | Phase::Devil | Phase::Shop => {
                 m[A_YES] = true;
@@ -380,6 +456,14 @@ impl Env {
 
     /// 행동 하나를 적용한다. 무효한 행동은 상태를 바꾸지 않고 `None`을 돌려준다.
     pub fn step(&mut self, a: usize) -> Option<StepOut> {
+        // 합성 우선 규칙: 작동 중이면 기본→동 합성 드래그만 받는다
+        let mut forced = false;
+        if let Some(set) = self.merge_rule_set() {
+            if !set.contains(&a) {
+                return None;
+            }
+            forced = true;
+        }
         let (s0, d0, a0) = (self.game.score(), self.game.day, self.game.achievements);
         let phi0 = if self.econ_w != 0.0 { self.econ_w * econ_units(self.game.swaps, &self.chest_census().1) } else { 0.0 };
         let opp = self.game.phase == Phase::Idle && self.chest_merge_available();
@@ -388,6 +472,10 @@ impl Env {
         if !self.apply(a) {
             self.game.stat_steps -= 1;
             return None;
+        }
+        if forced {
+            self.merge_forced_today += 1;
+            self.merge_rule_uses += 1;
         }
         self.ep_steps += 1;
         let merged = self.game.chest_made[2..].iter().sum::<u32>() > merged0;
@@ -424,6 +512,7 @@ impl Env {
             self.day = g.day;
             self.day_actions = 0;
             self.flipped_today.clear();
+            self.merge_forced_today = 0;
         }
         Some(StepOut {
             reward: (g.score() - s0) as f32 / 100.0 + bonus + econ,
@@ -434,7 +523,7 @@ impl Env {
 
     fn apply(&mut self, a: usize) -> bool {
         // 상자 개봉 규칙: 낮의 상자 탭만 해당 (허용되지 않으면 무효, 비상 예외로 열면 센다)
-        let mut emergency = false;
+        let (mut emergency, mut silver) = (false, false);
         if (A_CELL..A_YES).contains(&a) && matches!(self.game.phase, Phase::Idle | Phase::Dusk) {
             let c = a - A_CELL;
             let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
@@ -443,6 +532,7 @@ impl Env {
                     return false;
                 }
                 emergency = self.game.tiles[t].tier < self.open_rule.min_tier;
+                silver = self.game.tiles[t].tier >= 3;
             }
         }
         let g = &mut self.game;
@@ -466,6 +556,9 @@ impl Env {
                     if r == ActionResult::Ok {
                         self.flipped_today.extend(cannon);
                         self.emergency_opens += emergency as u32;
+                        if silver {
+                            self.silver_open_day = g.day;
+                        }
                     }
                     r
                 }

@@ -5,6 +5,8 @@
 //! - 휴식일 버리기 금지를 켠 게임(절반)에서는 휴식일의 버리기 드래그가 마스크와 step 모두에서 막힌다.
 //! - 상자 개봉 규칙(게임마다 제한 없음 / 동상자부터 / 은상자부터 + 동상자 비상 예외 두 가지)을 테스트 안에서 따로 계산해
 //!   낮의 상자 탭 마스크·step과 정확히 대조한다. 비상 예외로 연 경우 통계가 1 오른다.
+//! - 합성 우선 규칙을 켠 게임에서 규칙이 작동하면: 마스크가 켠 행동은 모두 (규칙을 끈 복제본에서) 기본→동 무기 합성을 만들고,
+//!   끈 드래그는 만들지 않으며, step 유효 여부가 마스크와 같고, 허용된 행동을 두면 규칙 사용 통계가 1 오른다.
 use towerswap_core::env::{Env, OpenRule, A_CELL, A_YES, N_ACTIONS};
 use towerswap_core::kinds::Kind;
 use towerswap_core::{Dir, Game, Phase};
@@ -63,7 +65,7 @@ fn mask_matches_validity() {
     let mut r = Lcg(12345);
     let mut mask = vec![false; N_ACTIONS];
     let (mut states, mut episodes_done, mut phases) = (0u64, 0u64, std::collections::HashSet::new());
-    let (mut toss_blocked, mut open_blocked, mut emergency_ok) = (0u64, 0u64, 0u64);
+    let (mut toss_blocked, mut open_blocked, mut emergency_ok, mut merge_active) = (0u64, 0u64, 0u64, 0u64);
     for i in 0..300 {
         let mut game = Game::new_game(r.next() as u32 | 1, r.next() as u32 | 1);
         if i % 3 != 0 {
@@ -78,6 +80,11 @@ fn mask_matches_validity() {
         }
         let mut env = Env::from_game(game);
         env.no_toss_day_off = i % 2 == 1;
+        env.merge_rule = match i % 8 {
+            0 => Some((20, 6)),
+            4 => Some((0, 2)),
+            _ => None,
+        };
         env.open_rule = match i % 4 {
             1 => OpenRule { min_tier: 2, emergency: None },
             2 => OpenRule { min_tier: 3, emergency: Some((2, 0, 5)) },
@@ -94,9 +101,37 @@ fn mask_matches_validity() {
             assert!(!valid.is_empty(), "유효 행동 없음: {:?}", env.game.phase);
             phases.insert(format!("{:?}", env.game.phase));
             let weekday = env.game.phase == Phase::Idle && env.game.day != env.game.day_off_day;
+            let merge_set = env.merge_rule_set();
+            if let Some(set) = &merge_set {
+                merge_active += 1;
+                let makes_bronze = |a: usize| {
+                    let mut e = env.clone();
+                    e.merge_rule = None;
+                    let g0 = &env.game;
+                    e.step(a).map_or(false, |_| {
+                        let made = |t: usize| (0..3).map(|k| e.game.stat_made[k][t] - g0.stat_made[k][t]).sum::<u32>();
+                        made(2) > 0 && made(3) == 0 && made(4) == 0
+                    })
+                };
+                for a in 0..N_ACTIONS {
+                    let on = set.contains(&a);
+                    assert_eq!(mask[a], on, "합성 우선 규칙 마스크 불일치 {a}");
+                    if a < A_CELL {
+                        assert_eq!(makes_bronze(a), on, "합성 우선 규칙 판정 불일치 {a}");
+                    }
+                }
+                let a = set[0];
+                let mut e2 = env.clone();
+                let before = e2.merge_rule_uses;
+                e2.step(a).unwrap();
+                assert_eq!(e2.merge_rule_uses, before + 1, "합성 우선 규칙 통계가 오르지 않음");
+            }
             let off_ban = env.no_toss_day_off && env.game.phase == Phase::Idle && env.game.day == env.game.day_off_day;
             for a in 0..N_ACTIONS {
                 let ok = env.clone().step(a).is_some();
+                if merge_set.is_some() {
+                    assert_eq!(mask[a], ok, "합성 우선 규칙 중 step·마스크 불일치 {a}");
+                }
                 if mask[a] {
                     assert!(ok, "마스크가 켠 행동 {a}가 무효 ({:?})", env.game.phase);
                 }
@@ -113,7 +148,7 @@ fn mask_matches_validity() {
                 let g = &env.game;
                 let tap_phase = matches!(g.phase, Phase::Idle | Phase::Dusk);
                 let is_chest = |x: i32, y: i32| g.tile_at(x, y).filter(|&t| g.tiles[t].kind == Kind::Chest);
-                if tap_phase && (A_CELL..A_YES).contains(&a) {
+                if tap_phase && merge_set.is_none() && (A_CELL..A_YES).contains(&a) {
                     let c = a - A_CELL;
                     let (x, y) = ((c % 6) as i32 + 1, (c / 6) as i32);
                     if let Some(t) = is_chest(x, y) {
@@ -144,9 +179,10 @@ fn mask_matches_validity() {
             env.step(a).unwrap();
         }
     }
-    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개, 막힌 상자 탭 {open_blocked}개, 비상 예외로 허용된 탭 {emergency_ok}개");
+    eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개, 막힌 상자 탭 {open_blocked}개, 비상 예외로 허용된 탭 {emergency_ok}개, 합성 우선 규칙 작동 상태 {merge_active}개");
     assert!(states > 10_000);
     assert!(toss_blocked > 0);
     assert!(open_blocked > 0);
     assert!(emergency_ok > 0);
+    assert!(merge_active > 0);
 }

@@ -76,6 +76,7 @@ def main():
     p.add_argument("--pool-open-min-tier", type=int, default=2)
     p.add_argument("--open-min-tier", type=int, default=3)
     p.add_argument("--emergency", default="2,0,5")
+    p.add_argument("--merge-rule", default="", help="합성 우선 규칙 '남은 스왑 하한,하루 최대 횟수' (평가 모델의 규칙)")
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
     dev = torch.device(args.device)
@@ -83,12 +84,13 @@ def main():
     hold, k, info = capture(Policy(args.pool_ckpt, dev), args.pool_games, args.pool_seed, args.pool,
                             env_kw={"open_min_tier": args.pool_open_min_tier})
     pol = Policy(args.ckpt, dev)
-    rule = {"open_min_tier": args.open_min_tier, "emergency": parse_emergency(args.emergency)}
+    rule = {"open_min_tier": args.open_min_tier, "emergency": parse_emergency(args.emergency),
+            "merge_rule": tuple(int(x) for x in args.merge_rule.split(",")) if args.merge_rule else None}
     n = args.games
     (fa, ra, ca), (fb, rb, cb) = (run(pol, n, args.seed, hold, k, pl, rule, args.pool_seed) for pl in (3, 0))
     assert (ca.start == cb.start).all(), "짝이 어긋남: 있음/없음 조건의 시작 상태가 다르다"
     st = ca.start
-    print(f"=== {args.ckpt} · 규칙 {args.open_min_tier}등급부터, 비상 {args.emergency or '없음'} · 평가 풀 {describe(info)} · {n}판 ({time.time() - t0:.0f}s) ===")
+    print(f"=== {args.ckpt} · 규칙 {args.open_min_tier}등급부터, 비상 {args.emergency or '없음'}, 합성 우선 {args.merge_rule or '없음'} · 평가 풀 {describe(info)} · {n}판 ({time.time() - t0:.0f}s) ===")
     la, lb = fa - st, fb - st
     d = la - lb
     print(f"  이후 생존(최종 − 시작일): 은상자 있음 {la.mean():.2f} · 없음 {lb.mean():.2f} · 차이 {d.mean():+.2f} ± {d.std(ddof=1) / np.sqrt(n):.2f}"

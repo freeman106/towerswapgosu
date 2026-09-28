@@ -194,6 +194,7 @@ def main():
     p.add_argument("--seed", type=int, default=777)
     p.add_argument("--open-min-tier", type=int, default=1)
     p.add_argument("--emergency", default="")
+    p.add_argument("--merge-rule", default="", help="합성 우선 규칙 '남은 스왑 하한,하루 최대 횟수'")
     p.add_argument("--toss-ban", type=int, default=1, help="휴식일 버리기 금지 (기본 켬)")
     p.add_argument("--out", default="")
     p.add_argument("--silver-tier", type=int, default=3, help="분석 기준 상자 등급 (기본 은상자 3, 시험용으로만 바꾼다)")
@@ -205,11 +206,12 @@ def main():
     n = args.games
     t0 = time.time()
     c, fins = Cycle(n), []
-    rule = {"open_min_tier": args.open_min_tier, "emergency": parse_emergency(args.emergency)}
+    rule = {"open_min_tier": args.open_min_tier, "emergency": parse_emergency(args.emergency),
+            "merge_rule": tuple(int(x) for x in args.merge_rule.split(",")) if args.merge_rule else None}
     fin = play(pol, n, args.seed, False, 0, 0, 0, None, ctl=c, no_toss=bool(args.toss_ban), fin_rec=fins, env_kw=rule)
     fins.sort(key=lambda f: f["env"])
     games = analyze(fin, fins, c, n)
-    rule_s = "제한 없음" if args.open_min_tier <= 1 else f"{args.open_min_tier}등급부터 개봉" + (f", 비상 예외 {args.emergency}" if args.emergency else "")
+    rule_s = "제한 없음" if args.open_min_tier <= 1 else f"{args.open_min_tier}등급부터 개봉" + (f", 비상 예외 {args.emergency}" if args.emergency else "") + (f", 합성 우선 {args.merge_rule}" if args.merge_rule else "")
     report(f"{args.ckpt} ({rule_s}, 시드 {args.seed} {n}판, {time.time() - t0:.0f}s)", fin, fins, c, games, n)
     if args.out:
         with open(args.out, "w") as f:

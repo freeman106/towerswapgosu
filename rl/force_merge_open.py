@@ -5,7 +5,8 @@
 후보끼리 정책 확률을 다시 정규화해 고른다(같은 샘플링 잡음으로 argmax). 정책이 스스로 합성하면 개입으로 세지 않는다.
 보고: 개봉일 고른 수(생산·합성·성 보수·버리기), 밤 직전 공격 타워 종류·등급·5~6행, 그날 밤 피해, 동·은상자 생성,
 두 번째 은상자 개봉, 개봉 뒤 생존. 전체 평균과, 개입이 일어난 게임만의 짝 비교(정책 그대로 대비 차이 ± 표준오차).
-사용: python rl/force_merge_open.py ckpt [ckpt ...] [--games 512] [--min-swaps 20] [--max-k 3]"""
+--grid "10:3,20:6,..."를 주면 기본→동 개입만 (남은 스왑 기준:하루 최대 횟수) 조합별로 두고 핵심 지표의 짝 차이를 한 표로 보인다.
+사용: python rl/force_merge_open.py ckpt [ckpt ...] [--games 512] [--min-swaps 20] [--max-k 3] [--grid 10:3,20:3,...]"""
 import argparse
 from collections import Counter
 
@@ -115,6 +116,34 @@ def metrics(fin, fins, c, i):
     return m
 
 
+GRID_KEYS = ("생존", "밤 피해", "동 무기", "5~6행 동+", "전력", "생산", "버리기", "성 보수", "동상자", "둘째 은상자")
+
+
+def grid(args, dev, hold, k, rule, n):
+    """기본→동 개입 강도별 짝 차이 (개입이 일어난 게임, 같은 게임의 정책 그대로 대비)"""
+    combos = [tuple(int(x) for x in c.split(":")) for c in args.grid.split(",")]
+    for ck in args.ckpts:
+        pol = Policy(ck, dev)
+        c0 = ForceMerge(n, None, 0, 0)
+        fin, fins, _ = run(pol, n, args.seed, hold, k, 3, rule, args.pool_seed, ctl=c0)
+        base = [metrics(fin, fins, c0, i) for i in range(n)]
+        print(f"\n=== {ck} · 기본→동 개입 강도별 · {n}판 (정책 그대로 생존 {np.mean([m['생존'] for m in base]):.2f}일) ===")
+        print("  " + f"{'스왑≥:최대':<10s}{'개입 게임':>9s}{'개입/판':>8s}" + "".join(f"{kk:>15s}" for kk in GRID_KEYS))
+        for ms_, mk in combos:
+            c = ForceMerge(n, "bronze", ms_, mk)
+            fin, fins, _ = run(pol, n, args.seed, hold, k, 3, rule, args.pool_seed, ctl=c)
+            ms = [metrics(fin, fins, c, i) for i in range(n)]
+            sel = np.nonzero(c.k > 0)[0]
+            cells = []
+            for kk in GRID_KEYS:
+                a = np.array([ms[i].get(kk, np.nan) for i in sel], float)
+                b = np.array([base[i].get(kk, np.nan) for i in sel], float)
+                ok = ~np.isnan(a) & ~np.isnan(b)
+                dd = a[ok] - b[ok]
+                cells.append(f"{dd.mean():+.2f}±{dd.std(ddof=1) / np.sqrt(len(dd)):.2f}" if len(dd) > 1 else "-")
+            print("  " + f"{f'{ms_}:{mk}':<10s}{len(sel):>9d}{c.k[sel].mean() if len(sel) else 0:>8.1f}" + "".join(f"{x:>15s}" for x in cells))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("ckpts", nargs="+")
@@ -122,6 +151,7 @@ def main():
     p.add_argument("--seed", type=int, default=777)
     p.add_argument("--min-swaps", type=int, default=20)
     p.add_argument("--max-k", type=int, default=3)
+    p.add_argument("--grid", default="", help="기본→동 개입 강도 조합 '남은 스왑 기준:하루 최대 횟수' 목록")
     p.add_argument("--pool", type=int, default=1024)
     p.add_argument("--pool-ckpt", default="runs/cn1/agent_30M.pt")
     p.add_argument("--pool-seed", type=int, default=4321)
@@ -134,6 +164,9 @@ def main():
     n = args.games
     keys = ("생존", "밤 피해", "전력", "기본 무기", "동 무기", "은 무기", "5~6행 동+", "생산", "동 합성", "은 합성", "상자 합성", "성 보수",
             "버리기", "그 밖의 이동", "동상자", "은상자", "둘째 은상자")
+    if args.grid:
+        grid(args, dev, hold, k, rule, n)
+        return
     for ck in args.ckpts:
         pol = Policy(ck, dev)
         res = {}

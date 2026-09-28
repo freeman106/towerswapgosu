@@ -33,6 +33,7 @@ struct Slot {
     econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
     no_toss_day_off: bool,    // 휴식일 버리기 금지
     open_rule: OpenRule,      // 상자 개봉 규칙
+    merge_rule: Option<(i64, u32)>, // 합성 우선 규칙 (남은 스왑 하한, 하루 최대 횟수)
     practice: u8,            // 지금 게임의 연습 시작 난이도 (0: 정상 시작)
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
@@ -75,6 +76,7 @@ impl Slot {
         (self.env.econ_w, self.env.econ_gamma) = self.econ;
         self.env.no_toss_day_off = self.no_toss_day_off;
         self.env.open_rule = self.open_rule;
+        self.env.merge_rule = self.merge_rule;
         self.steps = 0;
     }
 }
@@ -235,6 +237,7 @@ struct Finished {
     made_tw_row: [[u32; 8]; 5],
     emergency_opens: u32,
     start_day: i32,
+    merge_rule_uses: u32,
 }
 
 impl Finished {
@@ -270,6 +273,7 @@ impl Finished {
             made_tw_row: g.stat_made_row,
             emergency_opens: e.emergency_opens,
             start_day: e.start_day(),
+            merge_rule_uses: e.merge_rule_uses,
         }
     }
 }
@@ -304,9 +308,10 @@ impl VecEnv {
     /// no_toss_day_off: 휴식일 버리기 금지 (행동 마스크 제약),
     /// 상자 개봉 규칙 (행동 마스크 제약): open_min_tier 미만 등급은 열 수 없다(no_open_normal=True는 open_min_tier=2와 같다).
     /// emergency=(등급, 남은 스왑 상한, 하트 상한)이면 그 등급 상자는 스왑·하트가 상한 이하이고 지금 열 수 있는
-    /// open_min_tier 이상 상자가 없을 때만 열 수 있다
+    /// open_min_tier 이상 상자가 없을 때만 열 수 있다.
+    /// merge_rule=(남은 스왑 하한, 하루 최대 횟수): 은상자 이상을 연 날 기본→동 무기 합성 드래그가 있으면 행동을 그 드래그로 제한한다
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false, open_min_tier = 1, emergency = None))]
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false, open_min_tier = 1, emergency = None, merge_rule = None))]
     fn new(
         n: usize,
         seed: u64,
@@ -319,6 +324,7 @@ impl VecEnv {
         no_open_normal: bool,
         open_min_tier: u8,
         emergency: Option<(u8, i64, i32)>,
+        merge_rule: Option<(i64, u32)>,
     ) -> PyResult<Self> {
         let open_rule = OpenRule { min_tier: open_min_tier.max(if no_open_normal { 2 } else { 1 }), emergency };
         let mut cb = [0.0f32; 5];
@@ -344,6 +350,7 @@ impl VecEnv {
                     econ: (econ_w, econ_gamma),
                     no_toss_day_off,
                     open_rule,
+                    merge_rule,
                     practice: 0,
                     aux: None,
                     aux_prep: false,
@@ -649,6 +656,7 @@ impl VecEnv {
                 d.set_item("made_rows", f.made_tw_row.iter().map(|r| r.to_vec()).collect::<Vec<_>>())?;
                 d.set_item("emergency_opens", f.emergency_opens)?;
                 d.set_item("start_day", f.start_day)?;
+                d.set_item("merge_rule_uses", f.merge_rule_uses)?;
                 Ok(d)
             })
             .collect()
@@ -689,6 +697,7 @@ impl VecEnv {
             (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
             slot.env.no_toss_day_off = slot.no_toss_day_off;
             slot.env.open_rule = slot.open_rule;
+            slot.env.merge_rule = slot.merge_rule;
             slot.steps = 0;
             slot.practice = 0;
             slot.aux = None;
