@@ -108,12 +108,14 @@ class NoSearchDayOff:
         pass
 
 
-def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None, ctl=None, no_toss=False, no_open=False):
+def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames=None, env=None, ctl=None, no_toss=False, no_open=False,
+         fin_rec=None):
     """log: 분석용 기록(dict, 결정·하루 단위), rec: 증류용 기록(dict of lists, 모든 스텝),
     frames: 리플레이용 기록(게임별 목록, 행동 직전 상태·보드·고른 행동·정책 상위 행동·탐색 후보),
     env: 이미 상태를 넣어 둔 VecEnv(되돌린 상태에서 이어 두기). 주면 새 게임을 시작하지 않는다,
     ctl: 행동 개입. ctl.before(env, alive) → (게임 → 강제 행동, 탐색 안 할 게임 bool 배열), ctl.after(env, i, 행동)은 행동 직전에 호출,
-    no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용), no_open: 일반 상자 개봉 금지"""
+    no_toss: 새로 만드는 환경에 휴식일 버리기 금지(탐색 굴리기에도 적용), no_open: 일반 상자 개봉 금지,
+    fin_rec: 목록을 주면 게임별 종료 기록(pop_finished의 dict)을 모은다"""
     fresh = env is None
     if fresh:
         env = ts.VecEnv(n, seed=seed, no_toss_day_off=no_toss, no_open_normal=no_open)
@@ -268,6 +270,8 @@ def play(pol, n, seed, search, k, r, s, stats, z=0.0, log=None, rec=None, frames
         for i, f in fins.items():
             if alive[i]:
                 final[i] = f["day"]
+                if fin_rec is not None:
+                    fin_rec.append(f)
                 alive[i] = False
         step += 1
     return final
