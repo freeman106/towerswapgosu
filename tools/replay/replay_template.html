@@ -109,7 +109,7 @@ h1 {
 .bgc.water { background: linear-gradient(#2f79b5, #1f5f98); box-shadow: inset 0 0 0 .5px rgba(0,0,0,.2); }
 .bgc.castle { background: linear-gradient(#6f6a62, #56524c); box-shadow: inset 0 -3px 0 rgba(0,0,0,.25); }
 .sp { position: absolute; background-size: 100% 100%; image-rendering: pixelated; }
-.sp.flip { transform: scaleX(-1); }
+.sp.mirror { transform: scaleX(-1); }
 .badge { position: absolute; font: 600 11px "IBM Plex Mono", monospace; color: #fff; background: rgba(0,0,0,.65); border-radius: 99px; padding: 0 4px; z-index: 200; }
 .overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 300; overflow: visible; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 12px; color: var(--muted); font-size: 12px; max-width: 360px; }
@@ -406,8 +406,8 @@ __SPRITE_CSS__
     if (!key || !SPR[key]) return "";
     const [w, h] = SPR[key], [ox, oy] = OFF[s[0]] || [0, 0];
     const left = (x - 1) * 48 + ox, top = row * 48 - oy;
-    const flip = s[0] === "c" && s[2] === "<" ? " flip" : "";
-    let out = `<div class="sp spr-${key}${flip}" title="${tileName(s)}" style="left:calc(${left}px * var(--k));top:calc(${top}px * var(--k));width:calc(${w}px * var(--k));height:calc(${h}px * var(--k));z-index:${row * 10 + 5}"></div>`;
+    const mirror = s[0] === "c" && s[2] === "<" ? " mirror" : "";
+    let out = `<div class="sp spr-${key}${mirror}" title="${tileName(s)}" style="left:calc(${left}px * var(--k));top:calc(${top}px * var(--k));width:calc(${w}px * var(--k));height:calc(${h}px * var(--k));z-index:${row * 10 + 5}"></div>`;
     if (s[0] === "T") out += `<span class="badge" style="left:calc(${(x - 1) * 48 + 30}px * var(--k));top:calc(${row * 48 + 30}px * var(--k))">${s[1]}</span>`;
     return out;
   }
