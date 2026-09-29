@@ -858,6 +858,80 @@ impl VecEnv {
         let g = &self.slots[i].env.game;
         (g.stat_made.iter().map(|r| r[1..].to_vec()).collect(), g.stat_made_row.iter().map(|r| r.to_vec()).collect(), g.day_off_day)
     }
+
+    /// 진단: 게임 i의 상자 현황. (보드의 등급별 상자 수 0..5, 등급별 누적 생성 수 0..5(합성·악마·상점 배치),
+    /// 교환 한 번으로 합쳐지는 등급 비트, deep이면 교환 두 번 이내로 합쳐지는 등급 비트(아니면 0)). 비트는 1 << 등급, 패턴 검사(analysis::Board)
+    #[pyo3(signature = (i, deep = false))]
+    fn chest_info(&self, i: usize, deep: bool) -> (Vec<u32>, Vec<u32>, u8, u8) {
+        let g = &self.slots[i].env.game;
+        let b = Board::of(g);
+        let (d1, d2) = if deep { b.chest_merge_bits() } else { (b.one_swap_chest_merges(), 0) };
+        (b.chest_counts().to_vec(), g.chest_made.to_vec(), d1, d2)
+    }
+
+    /// 진단: 게임 idx[k]의 지금 상태에서 드래그 한 번으로 은상자 이상이 새로 생기는 드래그 수를 세 기준으로 out[k]에 쓴다(복제본, 게임은 그대로).
+    /// 0: 원래 게임 규칙(무기 합성 우선·휴식일 버리기 금지를 끈 복제본에서 유효), 1: 그중 지금 마스크에서 유효,
+    /// 2: 그중 직후 새 상자를 열 수 있음(silver_merge_drags와 같은 판정). 입력 대기(Idle)가 아니면 모두 0
+    fn silver_merge_counts(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, mut out: PyReadwriteArrayDyn<'_, i32>) -> PyResult<()> {
+        let idx = idx.as_slice()?;
+        let o = slice_mut(&mut out, idx.len() * 3, "out")?;
+        let slots = &self.slots;
+        py.detach(|| {
+            self.pool.install(|| {
+                idx.par_iter().zip(o.par_chunks_mut(3)).for_each(|(&i, o)| o.copy_from_slice(&silver_counts(&slots[i as usize].env)));
+            })
+        });
+        Ok(())
+    }
+}
+
+/// silver_merge_counts의 한 게임 판정
+fn silver_counts(env: &Env) -> [i32; 3] {
+    let mut n = [0; 3];
+    if env.game.phase != Phase::Idle {
+        return n;
+    }
+    let silver = |g: &Game| -> Vec<(usize, i32, i32)> {
+        let mut v = Vec::new();
+        for x in 1..=6i32 {
+            for y in 1..=7i32 {
+                if let Some(t) = g.grid[x as usize][y as usize] {
+                    if g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= 3 {
+                        v.push((t, x, y));
+                    }
+                }
+            }
+        }
+        v
+    };
+    let before: Vec<usize> = silver(&env.game).into_iter().map(|s| s.0).collect();
+    let mut raw_env = env.clone();
+    raw_env.merge_rule = None;
+    raw_env.no_toss_day_off = false;
+    let (mut mask, mut m2) = (vec![false; N_ACTIONS], vec![false; N_ACTIONS]);
+    env.mask(&mut mask);
+    for a in 0..A_DRAG_END {
+        let c = a / 4;
+        if !env.game.drag_valid((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4)) {
+            continue;
+        }
+        let mut e = raw_env.clone();
+        if e.step(a).is_none() || silver(&e.game).iter().all(|s| before.contains(&s.0)) {
+            continue;
+        }
+        n[0] += 1;
+        if !mask[a] {
+            continue;
+        }
+        n[1] += 1;
+        let mut e = env.clone();
+        if e.step(a).is_none() {
+            continue;
+        }
+        e.mask(&mut m2);
+        n[2] += silver(&e.game).into_iter().any(|(t, x, y)| !before.contains(&t) && m2[A_DRAG_END + (y as usize) * 6 + (x as usize - 1)]) as i32;
+    }
+    n
 }
 
 /// 탐색 슬롯 하나: 복제한 게임과 그날 밤이 끝날 때까지의 기록

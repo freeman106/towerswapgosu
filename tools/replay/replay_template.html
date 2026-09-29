@@ -153,6 +153,11 @@ h1 {
 .cond button { font: inherit; font-size: 13.5px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 99px; padding: 6px 14px; cursor: pointer; }
 .cond button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
 .cond .note { color: var(--muted); font-size: 12.5px; }
+.marks ol { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.marks button { font: inherit; font-size: 13px; text-align: left; width: 100%; border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 5px 9px; cursor: pointer; }
+.marks button:hover { border-color: var(--accent); }
+.marks button[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.marks .num { color: var(--accent); font-weight: 600; margin-right: 6px; }
 .alts .pv { text-align: right; }
 
 .controls { display: grid; gap: 10px; }
@@ -257,6 +262,11 @@ __SPRITE_CSS__
         <div class="pos" id="pos"></div>
         <div class="keys">키보드: ← → 한 수, PageUp·PageDown 하루, Space 재생</div>
       </div>
+
+      <div class="panel marks" id="marksPanel" hidden>
+        <div class="act-title">주요 행동</div>
+        <ol id="marks" aria-label="주요 행동으로 이동"></ol>
+      </div>
     </div>
   </section>
 
@@ -312,6 +322,8 @@ __SPRITE_CSS__
   }
   $("cSearch").textContent = L.a;
   $("cBase").textContent = L.b;
+  const SINGLE = !!(DATA.ui && DATA.ui.single);
+  if (SINGLE) { $("cSearch").hidden = true; $("cBase").hidden = true; }
   let gi = 0, fi = 0, timer = null;
 
   // 게임별 파생 정보: 날짜별 첫 프레임, 밤 직전 하트, 밤 손실
@@ -449,7 +461,7 @@ __SPRITE_CSS__
     $("sScore").textContent = f.sc.toLocaleString("ko-KR");
     $("sPhase").textContent = `단계: ${PHASE[f.p] || f.p}${f.off ? " · 휴식일" : ""} · 이날 ${k - D.first + 1}번째 행동 / ${D.n}`;
     const flipped = f.base !== undefined && f.base !== f.a;
-    $("aMain").innerHTML = `${describe(f)}${flipped ? '<span class="flip">탐색이 바꾼 수</span>' : ""}<span class="p num">정책 확률 ${(f.pa * 100).toFixed(f.pa < .1 ? 1 : 0)}%</span>`;
+    $("aMain").innerHTML = `${describe(f)}${flipped ? `<span class="flip">${L.flip || "탐색이 바꾼 수"}</span>` : ""}<span class="p num">정책 확률 ${(f.pa * 100).toFixed(f.pa < .1 ? 1 : 0)}%</span>`;
     $("aOrig").textContent = flipped ? `정책이 두려던 수: ${describe({ ...f, a: f.base })}` : "";
     const nx = g.frames[k + 1];
     let res = "";
@@ -495,7 +507,10 @@ __SPRITE_CSS__
     $("alts").innerHTML = rows.join("");
     $("scrub").value = k;
     const dv = games[gi].diverge;
-    $("pos").textContent = `행동 ${k + 1} / ${g.frames.length}` + (dv != null ? ` · 두 기록이 처음 갈리는 행동: ${dv + 1}` + (k === dv ? " (지금)" : "") : "");
+    const here = (games[gi].marks || []).filter(([m]) => m === k).map(([, t]) => t);
+    $("pos").textContent = `행동 ${k + 1} / ${g.frames.length}` + (dv != null ? ` · 두 기록이 처음 갈리는 행동: ${dv + 1}` + (k === dv ? " (지금)" : "") : "")
+      + (here.length ? ` · ${here.join(" · ")}` : "");
+    document.querySelectorAll("#marks button").forEach((b) => b.setAttribute("aria-current", +b.dataset.k === k));
     document.querySelectorAll("#dayRows tr").forEach((tr) => tr.classList.toggle("cur", +tr.dataset.day === f.d));
     document.querySelectorAll("#chart .cur-day").forEach((el) => el.setAttribute("x", el.dataset.x0 * 1 + (f.d - 1) * el.dataset.step));
   }
@@ -533,6 +548,12 @@ __SPRITE_CSS__
 
   function renderGames() {
     const how = (d) => d > 30 ? `30일 보스 통과 후 ${d}일 사망` : BOSS.has(d) ? `${d}일 보스 밤 사망` : `${d}일 밤 사망`;
+    if (SINGLE) {
+      $("games").innerHTML = games.map((g, j) => `<button class="game-btn" data-g="${j}" aria-pressed="${j === gi}"><span class="big">${g.label || "게임 " + g.id}</span>` +
+        `<span class="num">${g.search.frames[0].d}일 시작 · 행동 ${g.search.frames.length}개</span><span class="how">${how(g.search.day)}</span></button>`).join("");
+      $("games").querySelectorAll(".game-btn").forEach((b) => b.addEventListener("click", () => selectGame(+b.dataset.g)));
+      return;
+    }
     $("games").innerHTML = games.map((g, j) => {
       const b = g.base.day, s = g.search.day, dd = s - b;
       return `<button class="game-btn" data-g="${j}" aria-pressed="${j === gi}"><span class="big">${b}일 → ${s}일</span>` +
@@ -563,7 +584,10 @@ __SPRITE_CSS__
     g._days ??= derive(g);
     $("scrub").max = g.frames.length - 1;
     const G = games[gi];
-    $("condNote").textContent = `이 판: ${L.bShort} ${G.base.day}일, ${L.aShort} ${G.search.day}일${G.note ? " · " + G.note : ""} · 전환해도 같은 행동 번호를 유지합니다`;
+    $("condNote").textContent = SINGLE ? (G.note || "") : `이 판: ${L.bShort} ${G.base.day}일, ${L.aShort} ${G.search.day}일${G.note ? " · " + G.note : ""} · 전환해도 같은 행동 번호를 유지합니다`;
+    $("marksPanel").hidden = !(G.marks && G.marks.length);
+    $("marks").innerHTML = (G.marks || []).map(([k, t]) => `<li><button data-k="${k}"><span class="num">행동 ${k + 1}</span>${t}</button></li>`).join("");
+    $("marks").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { stop(); show(+b.dataset.k); }));
     $("bDiv").hidden = G.diverge == null;
     renderChart(g);
     renderDays(g);
