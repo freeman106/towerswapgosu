@@ -180,6 +180,10 @@ class Teacher(Restrict):
         if not jobs:
             return forced
         self.decide(env, jobs, step, forced, logits)
+        if torch.backends.mps.is_available() and step % 10 == 0:
+            if step % 200 == 0:
+                print(f"  [교사] 스텝 {step} · 진행 중 {len(live)}판 · MPS {torch.mps.driver_allocated_memory() / 2 ** 30:.1f}GB", flush=True)
+            torch.mps.empty_cache()  # 굴림마다 배치 크기가 달라 MPS가 크기별 버퍼를 쌓는다(1,024판에서 메모리 초과로 중단)
         return forced
 
     def decide(self, env, jobs, step, forced, logits):
