@@ -895,6 +895,14 @@ impl VecEnv {
         Ok(())
     }
 
+    /// 게임 idx[j]마다 1~2수 생산·합성 교사 후보 목록(teacher_plans, 가상 시드 seeds개)
+    #[pyo3(signature = (idx, seeds = 4))]
+    fn teacher_plans(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, seeds: usize) -> PyResult<Vec<Vec<TeachPlan>>> {
+        let idx = idx.as_slice()?.to_vec();
+        let slots = &self.slots;
+        Ok(py.detach(|| self.pool.install(|| idx.par_iter().map(|&i| teacher_plans(&slots[i as usize].env, seeds)).collect())))
+    }
+
     /// 게임 idx[j]의 난수에 기대지 않는 한 수 은상자 합성 드래그(safe_silver_drags, 가상 시드 seeds개)를 out[j, 행동] = true로 쓴다
     #[pyo3(signature = (idx, out, seeds = 4))]
     fn silver_safe_drags(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, mut out: PyReadwriteArrayDyn<'_, bool>, seeds: usize) -> PyResult<()> {
@@ -1052,6 +1060,173 @@ fn prep_silver_paths(env: &Env, k: usize) -> Vec<(usize, Vec<usize>)> {
         .collect()
 }
 
+/// 교사 판정용 보드 요약: 공격 무기·얼음벽 타일 (번호, 종류, 등급, x, y)과 자원 칸 수
+fn weapon_map(g: &Game) -> (Vec<(usize, Kind, u8, i32, i32)>, i32) {
+    let (mut v, mut res) = (Vec::new(), 0);
+    for x in 1..=6usize {
+        for y in 1..=7usize {
+            if let Some(t) = g.grid[x][y] {
+                let k = g.tiles[t].kind;
+                if matches!(k, Kind::ArrowTower | Kind::Ballista | Kind::Cannon | Kind::IceWall) {
+                    v.push((t, k, g.tiles[t].tier, x as i32, y as i32));
+                } else if k.is_resource() {
+                    res += 1;
+                }
+            }
+        }
+    }
+    (v, res)
+}
+
+/// 드래그 결과: 공격 무기(화살탑·발리스타·대포) 생성 수 [종류 3][등급 1..4] (엔진 통계, 연쇄 포함)
+fn attack_made(g0: &Game, g: &Game) -> [[i32; 4]; 3] {
+    let mut m = [[0; 4]; 3];
+    for k in 0..3 {
+        for t in 1..=4 {
+            m[k][t - 1] = (g.stat_made[k][t] - g0.stat_made[k][t]) as i32;
+        }
+    }
+    m
+}
+
+/// 교사 대상 결과인지: 기본 공격 무기 생산 또는 기본→동 합성이 있고, 은 이상 무기는 생기지 않음
+fn teach_ok(m: &[[i32; 4]; 3]) -> bool {
+    m.iter().any(|r| r[0] + r[1] > 0) && m.iter().all(|r| r[2] + r[3] == 0)
+}
+
+/// 교사 후보 하나: (첫 수, 둘째 수(-1: 한 수), 공격 무기 생성 수 [종류 3 × 등급 4], 새로 생긴·등급이 오른 무기 (종류, 등급, x, y),
+/// 사라진 무기 (종류, 등급), 자원 칸 변화(가상 시드 평균))
+type TeachPlan = (i64, i64, Vec<i32>, Vec<(String, i32, i32, i32)>, Vec<(String, i32)>, f32);
+
+fn teach_detail(g0: &Game, g: &Game) -> (Vec<(String, i32, i32, i32)>, Vec<(String, i32)>, i32) {
+    let (w0, r0) = weapon_map(g0);
+    let (w1, r1) = weapon_map(g);
+    let created = w1
+        .iter()
+        .filter(|&&(t, k, tier, _, _)| k != Kind::IceWall && !w0.iter().any(|&(t0, k0, tier0, _, _)| t0 == t && k0 == k && tier0 == tier))
+        .map(|&(_, k, tier, x, y)| (k.id().to_string(), tier as i32, x, y))
+        .collect();
+    let lost = w0
+        .iter()
+        .filter(|&&(t, _, _, _, _)| !w1.iter().any(|&(t1, _, _, _, _)| t1 == t))
+        .map(|&(_, k, tier, _, _)| (k.id().to_string(), tier as i32))
+        .collect();
+    (created, lost, r1 - r0)
+}
+
+/// 1~2수 생산·합성 교사 후보 (실제 난수 대신 고정 가상 시드 0..k를 쓰고, 모든 시드에서 공격 무기 생성 결과가 같아야 한다)
+/// - 한 수: 지금 마스크의 드래그로 자원 매치 → 기본 공격 무기 생산, 또는 기본 → 동 무기 합성 (은 이상 무기가 생기면 제외)
+/// - 두 수: 공격 무기를 만들지 않는 준비 드래그 p 뒤, 그 상태 마스크의 드래그 m이 위 결과를 만든다.
+///   지금 상태에서 m 한 수로 같은 결과가 나면(준비가 필요 없으면) 제외
+fn teacher_plans(env: &Env, k: usize) -> Vec<TeachPlan> {
+    let g0 = &env.game;
+    if g0.phase != Phase::Idle || g0.day == g0.day_off_day {
+        return Vec::new();
+    }
+    let mut mask = vec![false; N_ACTIONS];
+    env.mask(&mut mask);
+    let drags: Vec<usize> = (0..A_DRAG_END).filter(|&a| mask[a]).collect();
+    let seeded: Vec<Env> = (0..k)
+        .map(|s| {
+            let mut e = env.clone();
+            reseed(&mut e, s);
+            e
+        })
+        .collect();
+    let flat = |m: &[[i32; 4]; 3]| m.iter().flatten().copied().collect::<Vec<i32>>();
+    // 한 수 결과 (시드 0..k 모두 같은 공격 무기 생성). 복제 상태는 들고 있지 않는다(메모리): 준비 수 판정에 필요한 것만 남긴다
+    // (드래그, 결과 서명, 교사 후보면 계획, 준비 수로 쓸 수 있는지)
+    let one: Vec<(usize, Option<[[i32; 4]; 3]>, Option<TeachPlan>, bool)> = drags
+        .par_iter()
+        .map(|&a| {
+            let (mut sig, mut res_sum, mut detail, mut idle) = (None, 0.0f32, None, true);
+            for (s, e0) in seeded.iter().enumerate() {
+                let mut e = e0.clone();
+                if e.step(a).is_none() {
+                    return (a, None, None, false);
+                }
+                let m = attack_made(g0, &e.game);
+                if sig.map_or(false, |x| x != m) {
+                    return (a, None, None, false);
+                }
+                sig = Some(m);
+                idle &= e.game.phase == Phase::Idle;
+                if teach_ok(&m) {
+                    let (c, l, r) = teach_detail(g0, &e.game);
+                    res_sum += r as f32;
+                    if s == 0 {
+                        detail = Some((c, l));
+                    }
+                }
+            }
+            let m = match sig {
+                Some(m) => m,
+                None => return (a, None, None, false),
+            };
+            let plan = detail.map(|(c, l)| (a as i64, -1, flat(&m), c, l, res_sum / k as f32));
+            (a, Some(m), plan, idle && m.iter().flatten().all(|&v| v == 0))
+        })
+        .collect();
+    let mut plans: Vec<TeachPlan> = one.iter().filter_map(|o| o.2.clone()).collect();
+    let one_sig: Vec<(usize, [[i32; 4]; 3])> = one.iter().filter(|o| o.2.is_some()).map(|o| (o.0, o.1.unwrap())).collect();
+    if g0.swaps < 2 {
+        return plans;
+    }
+    // 두 수: 준비 드래그 p(모든 시드에서 공격 무기 생성 없음) 뒤 완성 드래그 m. 준비 뒤 상태는 p마다 다시 만든다
+    let two: Vec<TeachPlan> = one
+        .par_iter()
+        .filter(|o| o.3)
+        .flat_map_iter(|o| {
+            let p = o.0;
+            let mut outs = Vec::with_capacity(k);
+            for e0 in &seeded {
+                let mut e = e0.clone();
+                if e.step(p).is_none() {
+                    return Vec::new();
+                }
+                outs.push(e);
+            }
+            let mut mk = vec![false; N_ACTIONS];
+            outs[0].mask(&mut mk);
+            let mut found = Vec::new();
+            for m in (0..A_DRAG_END).filter(|&m| mk[m]) {
+                let mut sig = None;
+                let mut ends = Vec::new();
+                let mut ok = true;
+                for e0 in &outs {
+                    let mut mk2 = vec![false; N_ACTIONS];
+                    e0.mask(&mut mk2);
+                    let mut e = e0.clone();
+                    if !mk2[m] || e.step(m).is_none() {
+                        ok = false;
+                        break;
+                    }
+                    let mm = attack_made(&e0.game, &e.game);
+                    if !teach_ok(&mm) || sig.map_or(false, |s| s != mm) {
+                        ok = false;
+                        break;
+                    }
+                    sig = Some(mm);
+                    ends.push(e);
+                }
+                let sig = match (ok, sig) {
+                    (true, Some(s)) => s,
+                    _ => continue,
+                };
+                if one_sig.iter().any(|&(a, s)| a == m && s == sig) {
+                    continue; // 준비 없이도 같은 결과
+                }
+                let (created, lost, _) = teach_detail(g0, &ends[0].game);
+                let res = ends.iter().map(|e| teach_detail(g0, &e.game).2 as f32).sum::<f32>() / ends.len() as f32;
+                found.push((p as i64, m as i64, flat(&sig), created, lost, res));
+            }
+            found
+        })
+        .collect();
+    plans.extend(two);
+    plans
+}
+
 /// silver_merge_counts의 한 게임 판정
 fn silver_counts(env: &Env) -> [i32; 3] {
     let mut n = [0; 3];
@@ -1109,13 +1284,17 @@ struct SearchSlot {
     ret: f32,  // 누적 보상
     days: u32, // 지난 날 수
     active: bool,
+    dusk: i32, // 하루 끝내기(밤 시작) 직전 하트 (아직이면 -1)
 }
 
 impl SearchSlot {
     /// 행동 하나를 적용하고, 날이 바뀌었거나 게임이 끝났으면 멈춘다
     fn apply(&mut self, a: usize) -> Result<(), String> {
-        let phase = self.env.game.phase;
+        let (phase, hearts) = (self.env.game.phase, self.env.game.hearts);
         let o = self.env.step(a).ok_or_else(|| format!("탐색 슬롯: 무효 행동 {a} (단계 {phase:?})"))?;
+        if a == N_ACTIONS - 1 {
+            self.dusk = hearts;
+        }
         self.ret += o.reward;
         self.days += o.days;
         if o.done || self.env.game.day != self.day0 {
@@ -1145,7 +1324,7 @@ impl SearchEnv {
             .build()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let slots = (0..m)
-            .map(|_| SearchSlot { env: Env::new(1, 1), day0: 0, hearts0: 0, ret: 0.0, days: 0, active: false })
+            .map(|_| SearchSlot { env: Env::new(1, 1), day0: 0, hearts0: 0, ret: 0.0, days: 0, active: false, dusk: -1 })
             .collect();
         Ok(SearchEnv { slots, pool })
     }
@@ -1198,7 +1377,7 @@ impl SearchEnv {
                         let mut r = seeds[j];
                         env.game.rng_v = JsRng::new(splitmix(&mut r) as u32 | 1);
                         env.game.rng_m = JsRng::new(splitmix(&mut r) as u32 | 1);
-                        *slot = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: true };
+                        *slot = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: true, dusk: -1 };
                         if first[j] >= 0 {
                             slot.apply(first[j] as usize)?;
                         }
@@ -1228,7 +1407,7 @@ impl SearchEnv {
             let mut r = sd;
             env.game.rng_v = JsRng::new(splitmix(&mut r) as u32 | 1);
             env.game.rng_m = JsRng::new(splitmix(&mut r) as u32 | 1);
-            self.slots[d] = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: false };
+            self.slots[d] = SearchSlot { day0: env.game.day, hearts0: env.game.hearts, env, ret: 0.0, days: 0, active: false, dusk: -1 };
         }
         Ok(())
     }
@@ -1282,6 +1461,23 @@ impl SearchEnv {
     fn board(&self, j: usize) -> (Vec<Vec<String>>, Vec<String>) {
         let g = &self.slots[j].env.game;
         (g.board_cells(), g.turret_cells())
+    }
+
+    /// 슬롯 j의 (일차, 하트, 스왑, 단계 코드, 점수)
+    fn state(&self, j: usize) -> (i32, i32, i64, i32, i64) {
+        let g = &self.slots[j].env.game;
+        (g.day, g.hearts, g.swaps, g.phase.code(), g.score())
+    }
+
+    /// 슬롯별 밤 직전 하트(하루 끝내기 직전, 아직이면 -1)와 지금 하트
+    fn night(&self, mut dusk: PyReadwriteArray1<'_, i32>, mut hearts: PyReadwriteArray1<'_, i32>) -> PyResult<()> {
+        let m = self.slots.len();
+        let (d, h) = (slice_mut(&mut dusk, m, "dusk")?, slice_mut(&mut hearts, m, "hearts")?);
+        for (j, slot) in self.slots.iter().enumerate() {
+            d[j] = slot.dusk;
+            h[j] = slot.env.game.hearts;
+        }
+        Ok(())
     }
 
     /// 슬롯별 결과: 누적 보상, 지난 날 수, 사망 여부, 잃은 하트(사망이면 복제 시점 하트 전부)

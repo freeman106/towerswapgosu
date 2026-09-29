@@ -44,6 +44,7 @@ class Restrict(Ext):
         self.drags = [Counter() for _ in range(n)]  # 드래그 결과 분류 (휴식일 제외)
         self.duskrec = [[] for _ in range(n)]      # 밤 직전 (일차, 공격 무기[3][4], 하트, 얼음벽)
         self.flips = np.zeros(n, int)
+        self.lastcat = [""] * n                   # 직전 드래그 분류
         self.tosses = np.zeros(n, int)
 
     def force(self, env, alive, logits, noise, act):
@@ -73,6 +74,7 @@ class Restrict(Ext):
                 cat = "그 밖"
             else:
                 cat = "매치 없는 이동"
+            self.lastcat[i] = cat
             if not off:
                 self.drags[i][cat] += 1
         return super().force(env, alive, logits, noise, act)
