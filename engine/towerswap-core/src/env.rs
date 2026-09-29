@@ -12,6 +12,8 @@
 //! - 대포 방향 전환은 대포마다 하루 1회
 //! - 휴식일 행동은 DAY_OFF_CAP개까지 (넘으면 하루 끝내기만 가능)
 //! - 선택: 휴식일 버리기 금지(`no_toss_day_off`, 기본 끔). 휴식일에는 합칠 것을 다 합칠 수 있어 버리기는 손해뿐이다
+//! - 선택: 모든 버리기 금지(`no_toss`, 엔진의 보드 밖 버리기 판정 `drag_is_toss`)와 대포 방향 전환 금지(`no_cannon_flip`, 낮의 대포 탭).
+//!   둘 다 기본 끔. 이 두 제한 때문에 입력 대기·밤 직전에 할 수 있는 행동이 하나도 없으면 그 상태에서만 두 제한을 푼다
 //! - 선택: 상자 개봉 규칙(`open_rule`, 기본 제한 없음). `min_tier` 미만 등급은 열 수 없고, 비상 예외로 지정한 등급만
 //!   남은 스왑·하트가 기준 이하이고 지금 열 수 있는 `min_tier` 이상 상자가 없을 때 열 수 있다(허용일 뿐 강제 개봉은 아니다)
 //! - 선택: 재투자 보상(`reinvest_bonus[등급]`, 기본 0). 합성(업그레이드)으로 만든 상자를 열 때 등급별로 더한다(연습 배치·상점·악마 거래로 받은 상자는 제외).
@@ -177,6 +179,10 @@ pub struct Env {
     pub econ_gamma: f32,
     /// 휴식일 버리기 금지 (마스크와 step 모두)
     pub no_toss_day_off: bool,
+    /// 모든 날 버리기 금지 (마스크와 step 모두)
+    pub no_toss: bool,
+    /// 낮의 대포 방향 전환(대포 탭) 금지 (마스크와 step 모두)
+    pub no_cannon_flip: bool,
     /// 상자 개봉 규칙 (마스크와 step 모두)
     pub open_rule: OpenRule,
     /// 통계: 비상 예외로 연 상자 수
@@ -233,6 +239,8 @@ impl Env {
             econ_w: 0.0,
             econ_gamma: 1.0,
             no_toss_day_off: false,
+            no_toss: false,
+            no_cannon_flip: false,
             open_rule: OpenRule::default(),
             emergency_opens: 0,
             merge_rule: None,
@@ -374,18 +382,53 @@ impl Env {
 
     // ───────────────────────── 마스크 ─────────────────────────
 
-    fn tap_ok(&self, x: i32, y: i32, fairy_ok: &mut Option<bool>) -> bool {
+    fn tap_ok(&self, x: i32, y: i32, fairy_ok: &mut Option<bool>, relax: bool) -> bool {
         let g = &self.game;
         if !g.tap_valid(x, y) {
             return false;
         }
         let t = g.tile_at(x, y).unwrap();
         match g.tiles[t].kind {
-            Kind::Cannon => !self.flipped_today.contains(&t),
+            Kind::Cannon => !self.flipped_today.contains(&t) && (relax || !self.no_cannon_flip),
             Kind::Chest => self.chest_rule_ok(t),
             Kind::Fairy | Kind::FairyHouse => *fairy_ok.get_or_insert_with(|| g.fairy_any_move()),
             _ => true,
         }
+    }
+
+    /// 입력 대기·밤 직전의 드래그·탭·하루 끝내기 마스크 (합성 우선 규칙 전). relax면 버리기·대포 방향 전환 금지를 풀고 본다
+    fn mask_day(&self, m: &mut [bool], relax: bool) {
+        let g = &self.game;
+        let closed = g.closed_day();
+        if g.phase == Phase::Idle {
+            for y in 1..=ROWS as i32 {
+                for x in 1..=COLS as i32 {
+                    for d in 0..4 {
+                        let a = A_DRAG + ((y - 1) as usize * COLS + (x - 1) as usize) * 4 + d;
+                        let dir = Dir::from_index(d);
+                        let banned = ((closed && self.no_toss_day_off) || (self.no_toss && !relax)) && g.drag_is_toss(x, y, dir);
+                        m[a] = g.drag_valid(x, y, dir) && !banned;
+                    }
+                }
+            }
+        }
+        let mut fairy_ok = None;
+        for y in 1..=ROWS as i32 {
+            for x in 1..=COLS as i32 {
+                m[cell_action(x, y)] = self.tap_ok(x, y, &mut fairy_ok, relax);
+            }
+        }
+        m[A_END_DAY] = g.phase == Phase::Dusk || closed;
+    }
+
+    /// 버리기·대포 방향 전환 금지 때문에 입력 대기·밤 직전에 할 수 있는 행동이 없어 두 제한을 푸는 상태인지
+    fn day_relaxed(&self) -> bool {
+        if !(self.no_toss || self.no_cannon_flip) {
+            return false;
+        }
+        let mut m = vec![false; N_ACTIONS];
+        self.mask_day(&mut m, false);
+        !m.iter().any(|&b| b)
     }
 
     /// 유효한 행동 표시. 입력을 받는 단계라면 항상 하나 이상이다.
@@ -395,25 +438,14 @@ impl Env {
         let cells = |y0: i32| (y0..=ROWS as i32).flat_map(|y| (1..=COLS as i32).map(move |x| (x, y)));
         match g.phase {
             Phase::Idle | Phase::Dusk => {
-                let closed = g.closed_day();
-                if g.phase == Phase::Idle {
-                    if closed && self.day_actions >= DAY_OFF_CAP {
-                        m[A_END_DAY] = true;
-                        return;
-                    }
-                    for (x, y) in cells(1) {
-                        for d in 0..4 {
-                            let a = A_DRAG + ((y - 1) as usize * COLS + (x - 1) as usize) * 4 + d;
-                            let dir = Dir::from_index(d);
-                            m[a] = g.drag_valid(x, y, dir) && !(closed && self.no_toss_day_off && g.drag_is_toss(x, y, dir));
-                        }
-                    }
+                if g.phase == Phase::Idle && g.closed_day() && self.day_actions >= DAY_OFF_CAP {
+                    m[A_END_DAY] = true;
+                    return;
                 }
-                let mut fairy_ok = None;
-                for (x, y) in cells(1) {
-                    m[cell_action(x, y)] = self.tap_ok(x, y, &mut fairy_ok);
+                self.mask_day(m, false);
+                if (self.no_toss || self.no_cannon_flip) && !m.iter().any(|&b| b) {
+                    self.mask_day(m, true);
                 }
-                m[A_END_DAY] = g.phase == Phase::Dusk || closed;
                 if let Some(set) = self.merge_rule_set() {
                     m.fill(false);
                     for a in set {
@@ -553,13 +585,24 @@ impl Env {
                 }
             }
         }
+        if a < A_CELL {
+            let c = (a - A_DRAG) / 4;
+            let (x, y, dir) = ((c % COLS) as i32 + 1, (c / COLS) as i32 + 1, Dir::from_index(a % 4));
+            let g = &self.game;
+            if g.drag_is_toss(x, y, dir) && ((self.no_toss_day_off && g.closed_day()) || (self.no_toss && !self.day_relaxed())) {
+                return false;
+            }
+        } else if a < A_YES && self.no_cannon_flip && matches!(self.game.phase, Phase::Idle | Phase::Dusk) {
+            let c = a - A_CELL;
+            let (x, y) = ((c % COLS) as i32 + 1, (c / COLS) as i32);
+            if self.game.tile_at(x, y).map_or(false, |t| self.game.tiles[t].kind == Kind::Cannon) && !self.day_relaxed() {
+                return false;
+            }
+        }
         let g = &mut self.game;
         let r = if a < A_CELL {
             let c = (a - A_DRAG) / 4;
             let (x, y, dir) = ((c % COLS) as i32 + 1, (c / COLS) as i32 + 1, Dir::from_index(a % 4));
-            if self.no_toss_day_off && g.closed_day() && g.drag_is_toss(x, y, dir) {
-                return false;
-            }
             g.drag(x, y, dir)
         } else if a < A_YES {
             let c = a - A_CELL;

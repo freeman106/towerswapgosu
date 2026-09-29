@@ -32,6 +32,8 @@ struct Slot {
     chest_bonus: [f32; 5],
     econ: (f32, f32),         // 경제 조형 (가중치, 하루 할인)
     no_toss_day_off: bool,    // 휴식일 버리기 금지
+    no_toss: bool,            // 모든 날 버리기 금지
+    no_cannon_flip: bool,     // 대포 방향 전환 금지
     open_rule: OpenRule,      // 상자 개봉 규칙
     merge_rule: Option<(i64, u32)>, // 합성 우선 규칙 (남은 스왑 하한, 하루 최대 횟수)
     reinvest_bonus: [f32; 5],       // 재투자 보상 (등급별)
@@ -76,6 +78,8 @@ impl Slot {
         self.env.chest_bonus = self.chest_bonus;
         (self.env.econ_w, self.env.econ_gamma) = self.econ;
         self.env.no_toss_day_off = self.no_toss_day_off;
+        self.env.no_toss = self.no_toss;
+        self.env.no_cannon_flip = self.no_cannon_flip;
         self.env.open_rule = self.open_rule;
         self.env.merge_rule = self.merge_rule;
         self.env.reinvest_bonus = self.reinvest_bonus;
@@ -317,8 +321,9 @@ impl VecEnv {
     /// open_min_tier 이상 상자가 없을 때만 열 수 있다.
     /// merge_rule=(남은 스왑 하한, 하루 최대 횟수): 은상자 이상을 연 날 기본→동 무기 합성 드래그가 있으면 행동을 그 드래그로 제한한다.
     /// reinvest_bonus=[은, 금]: 합성으로 만든 은·금상자를 열 때 더하는 보상 (연습 배치·상점·악마 거래 상자 제외)
+    /// no_toss: 모든 날 버리기 금지, no_cannon_flip: 낮의 대포 방향 전환 금지 (둘 다 행동 마스크 제약)
     #[new]
-    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false, open_min_tier = 1, emergency = None, merge_rule = None, reinvest_bonus = None))]
+    #[pyo3(signature = (n, seed = 1, threads = 0, max_steps = 200_000, chest_bonus = None, econ_w = 0.0, econ_gamma = 1.0, no_toss_day_off = false, no_open_normal = false, open_min_tier = 1, emergency = None, merge_rule = None, reinvest_bonus = None, no_toss = false, no_cannon_flip = false))]
     fn new(
         n: usize,
         seed: u64,
@@ -333,6 +338,8 @@ impl VecEnv {
         emergency: Option<(u8, i64, i32)>,
         merge_rule: Option<(i64, u32)>,
         reinvest_bonus: Option<(f32, f32)>,
+        no_toss: bool,
+        no_cannon_flip: bool,
     ) -> PyResult<Self> {
         let mut rb = [0.0f32; 5];
         if let Some((b3, b4)) = reinvest_bonus {
@@ -361,6 +368,8 @@ impl VecEnv {
                     chest_bonus: cb,
                     econ: (econ_w, econ_gamma),
                     no_toss_day_off,
+                    no_toss,
+                    no_cannon_flip,
                     open_rule,
                     merge_rule,
                     reinvest_bonus: rb,
@@ -736,6 +745,8 @@ impl VecEnv {
             slot.env.chest_bonus = slot.chest_bonus;
             (slot.env.econ_w, slot.env.econ_gamma) = slot.econ;
             slot.env.no_toss_day_off = slot.no_toss_day_off;
+            slot.env.no_toss = slot.no_toss;
+            slot.env.no_cannon_flip = slot.no_cannon_flip;
             slot.env.open_rule = slot.open_rule;
             slot.env.merge_rule = slot.merge_rule;
             slot.env.reinvest_bonus = slot.reinvest_bonus;

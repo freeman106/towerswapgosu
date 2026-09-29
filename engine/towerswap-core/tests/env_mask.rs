@@ -3,6 +3,8 @@
 //! - 드래그 마스크는 실제 유효성과 정확히 같다(제한이 없는 평일).
 //! - 입력을 받는 단계에는 유효한 행동이 하나 이상 있다.
 //! - 휴식일 버리기 금지를 켠 게임(절반)에서는 휴식일의 버리기 드래그가 마스크와 step 모두에서 막힌다.
+//! - 모든 버리기 금지·대포 방향 전환 금지를 켠 게임에서는 입력 대기의 버리기 드래그와 입력 대기·밤 직전의 대포 탭이
+//!   마스크와 step 모두에서 막힌다(두 제한 때문에 행동이 하나도 없어 제한을 푸는 상태는 따로 센다).
 //! - 상자 개봉 규칙(게임마다 제한 없음 / 동상자부터 / 은상자부터 + 동상자 비상 예외 두 가지)을 테스트 안에서 따로 계산해
 //!   낮의 상자 탭 마스크·step과 정확히 대조한다. 비상 예외로 연 경우 통계가 1 오른다.
 //! - 합성 우선 규칙을 켠 게임에서 규칙이 작동하면: 마스크가 켠 행동은 모두 (규칙을 끈 복제본에서) 기본→동 무기 합성을 만들고,
@@ -66,6 +68,7 @@ fn mask_matches_validity() {
     let mut mask = vec![false; N_ACTIONS];
     let (mut states, mut episodes_done, mut phases) = (0u64, 0u64, std::collections::HashSet::new());
     let (mut toss_blocked, mut open_blocked, mut emergency_ok, mut merge_active) = (0u64, 0u64, 0u64, 0u64);
+    let (mut all_toss_blocked, mut flip_blocked, mut relaxed) = (0u64, 0u64, 0u64);
     for i in 0..300 {
         let mut game = Game::new_game(r.next() as u32 | 1, r.next() as u32 | 1);
         if i % 3 != 0 {
@@ -80,6 +83,8 @@ fn mask_matches_validity() {
         }
         let mut env = Env::from_game(game);
         env.no_toss_day_off = i % 2 == 1;
+        env.no_toss = i % 5 == 1 || i % 5 == 3;
+        env.no_cannon_flip = i % 5 == 2 || i % 5 == 3;
         env.merge_rule = match i % 8 {
             0 => Some((20, 6)),
             4 => Some((0, 2)),
@@ -127,6 +132,28 @@ fn mask_matches_validity() {
                 assert_eq!(e2.merge_rule_uses, before + 1, "합성 우선 규칙 통계가 오르지 않음");
             }
             let off_ban = env.no_toss_day_off && env.game.phase == Phase::Idle && env.game.day == env.game.day_off_day;
+            let day_phase = matches!(env.game.phase, Phase::Idle | Phase::Dusk);
+            let is_relaxed = day_phase && (env.no_toss || env.no_cannon_flip) && {
+                let mut e = env.clone();
+                e.no_toss = false;
+                e.no_cannon_flip = false;
+                let mut m0 = vec![false; N_ACTIONS];
+                e.mask(&mut m0);
+                // 제한 없는 마스크의 행동이 모두 금지 대상이면 제한을 푼다
+                (0..N_ACTIONS).filter(|&a| m0[a]).all(|a| {
+                    let g = &env.game;
+                    if a < A_CELL {
+                        let c = a / 4;
+                        env.no_toss && g.drag_is_toss((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4))
+                    } else if a < A_YES {
+                        let c = a - A_CELL;
+                        env.no_cannon_flip && g.tile_at((c % 6) as i32 + 1, (c / 6) as i32).map_or(false, |t| g.tiles[t].kind == Kind::Cannon)
+                    } else {
+                        false
+                    }
+                }) && env.merge_rule_set().is_none()
+            };
+            relaxed += is_relaxed as u64;
             for a in 0..N_ACTIONS {
                 let ok = env.clone().step(a).is_some();
                 if merge_set.is_some() {
@@ -143,6 +170,26 @@ fn mask_matches_validity() {
                     if env.game.drag_is_toss((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4)) {
                         assert!(!mask[a] && !ok, "휴식일 버리기 {a}가 막히지 않음");
                         toss_blocked += 1;
+                    }
+                }
+                if !is_relaxed && day_phase && merge_set.is_none() {
+                    let g = &env.game;
+                    if env.no_toss && g.phase == Phase::Idle && a < A_CELL {
+                        let c = a / 4;
+                        if g.drag_valid((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4))
+                            && g.drag_is_toss((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4))
+                        {
+                            assert!(!mask[a] && !ok, "버리기 {a}가 막히지 않음");
+                            all_toss_blocked += 1;
+                        }
+                    }
+                    if env.no_cannon_flip && (A_CELL..A_YES).contains(&a) {
+                        let c = a - A_CELL;
+                        let (x, y) = ((c % 6) as i32 + 1, (c / 6) as i32);
+                        if y >= 1 && g.tile_at(x, y).map_or(false, |t| g.tiles[t].kind == Kind::Cannon) && g.tap_valid(x, y) {
+                            assert!(!mask[a] && !ok, "대포 방향 전환 {a}가 막히지 않음");
+                            flip_blocked += 1;
+                        }
                     }
                 }
                 let g = &env.game;
@@ -180,9 +227,12 @@ fn mask_matches_validity() {
         }
     }
     eprintln!("상태 {states}개, 끝난 게임 {episodes_done}개, 단계 {phases:?}, 막힌 휴식일 버리기 {toss_blocked}개, 막힌 상자 탭 {open_blocked}개, 비상 예외로 허용된 탭 {emergency_ok}개, 합성 우선 규칙 작동 상태 {merge_active}개");
+    eprintln!("모든 버리기 금지로 막힌 드래그 {all_toss_blocked}개, 막힌 대포 방향 전환 {flip_blocked}개, 제한을 푼 상태 {relaxed}개");
     assert!(states > 10_000);
     assert!(toss_blocked > 0);
     assert!(open_blocked > 0);
     assert!(emergency_ok > 0);
     assert!(merge_active > 0);
+    assert!(all_toss_blocked > 0);
+    assert!(flip_blocked > 0);
 }
