@@ -46,6 +46,8 @@ def parse_args():
     p.add_argument("--econ-shaping", type=float, default=0.0,
                    help="퍼텐셜 기반 경제 조형의 스왑 1개당 가중치 w: Φ = w·(남은 스왑 + 보드 상자의 개봉 스왑), 0이면 끔")
     p.add_argument("--no-toss-day-off", type=int, default=0, help="1이면 휴식일 버리기 금지 (행동 마스크 제약)")
+    p.add_argument("--no-toss", type=int, default=0, help="1이면 모든 날 버리기 금지 (엔진 버리기 판정, 행동 마스크 제약)")
+    p.add_argument("--no-cannon-flip", type=int, default=0, help="1이면 낮의 대포 방향 전환 금지 (행동 마스크 제약)")
     p.add_argument("--no-open-normal", type=int, default=0, help="1이면 일반(1등급) 상자 개봉 금지, 동상자부터 연다 (--open-min-tier 2와 같음)")
     p.add_argument("--open-min-tier", type=int, default=1, help="평소 열 수 있는 최소 상자 등급 (행동 마스크 제약, 1이면 제한 없음)")
     p.add_argument("--emergency", default="", help="비상 예외 '등급,스왑 상한,하트 상한' (예: 2,0,5): 그 등급 상자는 스왑·하트가 상한 이하이고 "
@@ -272,7 +274,8 @@ def main():
                     no_toss_day_off=bool(args.no_toss_day_off), no_open_normal=bool(args.no_open_normal),
                     open_min_tier=args.open_min_tier, emergency=parse_emergency(args.emergency),
                     merge_rule=tuple(int(x) for x in args.merge_rule.split(",")) if args.merge_rule else None,
-                    reinvest_bonus=tuple(float(x) for x in args.reinvest_bonus.split(",")) if args.reinvest_bonus else None)
+                    reinvest_bonus=tuple(float(x) for x in args.reinvest_bonus.split(",")) if args.reinvest_bonus else None,
+                    no_toss=bool(args.no_toss), no_cannon_flip=bool(args.no_cannon_flip))
     levels = [int(x) for x in args.start_level.split(",")] if args.start_level else []
     aux_levels = [int(x) for x in args.aux_levels.split(",")] if args.aux_coef > 0 else []
     if levels:

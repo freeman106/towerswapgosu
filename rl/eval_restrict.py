@@ -6,7 +6,8 @@
 기록: 생존·점수·20일 보스 통과, 밤 직전 공격 무기(종류·등급)·하트·밤 피해, 엔진 통계의 무기 생산·합성 횟수,
 드래그별 결과(휴식일 제외, 복제 없이 전후 엔진 통계로 판정: 공격 무기 합성 / 생산 / 얼음벽 / 상자 / 성 보수 / 포탑 / 버리기 / 매치 없는 이동),
 비상 동상자 개봉, 동상자 2·3개 동시 보유, 첫 은상자 도달.
-사용: python rl/eval_restrict.py rl/runs/cn7/agent_10M.pt [--games 256] [--conds A,B,C,D]"""
+사용: python rl/eval_restrict.py rl/runs/cn7/agent_10M.pt [--games 256] [--conds A,B,C,D]
+     모델마다 다른 체크포인트·제한: --spec 이름=체크포인트:조건 ... --pairs 이름1-이름2,... (짝 비교: 이름1 − 이름2)"""
 import argparse
 import json
 import time
@@ -95,8 +96,8 @@ class Restrict(Ext):
         super().after(env, i, a)
 
 
-def report(res, n, base="A"):
-    print(f"\n{'':<26s}" + "".join(f"{m + ' ' + CONDS[m][0]:>18s}" for m in res))
+def report(res, n, labels, pairs):
+    print(f"\n{'':<26s}" + "".join(f"{labels[m]:>18s}" for m in res))
     row = lambda name, f, fmt="{:.2f}": print(f"  {name:<24s}" + "".join(f"{fmt.format(f(m)):>18s}" for m in res))
     rowtxt = lambda name, f: print(f"  {name:<24s}" + "".join(f"{f(m):>18s}" for m in res))
     fin = {m: r[0] for m, r in res.items()}
@@ -107,8 +108,10 @@ def report(res, n, base="A"):
     row("점수", lambda m: np.mean([d + 1000 * min(5, (d - 1) // 10) for d in fin[m]]), "{:.0f}")
     row("20일 보스 통과", lambda m: np.mean(fin[m] > 20), "{:.1%}")
     row("10일 보스 통과", lambda m: np.mean(fin[m] > 10), "{:.1%}")
-    row("짝 생존 차이(대 A)", lambda m: 0.0 if m == base else (fin[m] - fin[base]).mean(), "{:+.2f}")
-    row("  표준오차", lambda m: 0.0 if m == base else (fin[m] - fin[base]).std(ddof=1) / np.sqrt(n), "{:.2f}")
+    for x, y in pairs:
+        d = fin[x] - fin[y]
+        print(f"  짝 {x} − {y}: 생존 {se(d)}일 · 점수 {np.mean([a + 1000 * min(5, (a - 1) // 10) for a in fin[x]]) - np.mean([a + 1000 * min(5, (a - 1) // 10) for a in fin[y]]):+.0f} · "
+              f"20일 통과 {np.mean(fin[x] > 20) - np.mean(fin[y] > 20):+.1%} · 더 오래 {np.mean(d > 0):.0%}·같음 {np.mean(d == 0):.0%}·더 짧음 {np.mean(d < 0):.0%}")
     print("  -- 확인: 제한된 행동 (게임당)")
     row("대포 방향 전환", lambda m: ctl[m].flips.mean())
     row("버리기(휴식일 포함)", lambda m: ctl[m].tosses.mean())
@@ -134,21 +137,19 @@ def report(res, n, base="A"):
         row("얼음벽", lambda m: sum(r[3] for r, _ in recs[m]) / cnt(m))
         row("밤 직전 하트", lambda m: sum(r[2] for r, _ in recs[m]) / cnt(m))
         row("밤 피해", lambda m: np.mean([ctl[m].night[i].get(r[0], np.nan) for r, i in recs[m]]) if recs[m] else np.nan)
-    print("  -- 같은 게임·같은 날 짝 (두 조건 모두 그날 밤을 맞음), 대 A")
-    for m in res:
-        if m == base:
-            continue
-        pairs = []
+    print("  -- 같은 게임·같은 날 짝 (두 조건 모두 그날 밤을 맞음)")
+    for m, base in pairs:
+        pl = []
         for i in range(n):
             a_ = {r[0]: r for r in ctl[base].duskrec[i]}
             for r in ctl[m].duskrec[i]:
                 if r[0] in a_ and r[0] <= 20:
                     q = a_[r[0]]
                     pw = lambda z: (z[1] * np.array([1, 3, 9, 27])).sum()
-                    pairs.append((pw(r) - pw(q), r[2] - q[2], ctl[m].night[i].get(r[0], np.nan) - ctl[base].night[i].get(r[0], np.nan)))
-        pr = np.array(pairs)
+                    pl.append((pw(r) - pw(q), r[2] - q[2], ctl[m].night[i].get(r[0], np.nan) - ctl[base].night[i].get(r[0], np.nan)))
+        pr = np.array(pl)
         ok = ~np.isnan(pr[:, 2])
-        print(f"    {m}: 20일까지 {len(pr)}쌍 · 전력 {se(pr[:, 0])} · 밤 직전 하트 {se(pr[:, 1])} · 밤 피해 {se(pr[ok, 2])}")
+        print(f"    {m} − {base}: 20일까지 {len(pr)}쌍 · 전력 {se(pr[:, 0])} · 밤 직전 하트 {se(pr[:, 1])} · 밤 피해 {se(pr[ok, 2])}")
     print("  -- 상자")
     row("비상 동상자 개봉/게임", lambda m: np.mean([f["emergency_opens"] for f in fins[m]]))
     row("동상자 2개 동시 보유", lambda m: np.mean([g["held2"] is not None for g in ctl[m].g]), "{:.1%}")
@@ -159,25 +160,36 @@ def report(res, n, base="A"):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("ckpt")
+    p.add_argument("ckpt", nargs="?", default="")
     p.add_argument("--games", type=int, default=256)
     p.add_argument("--seed", type=int, default=777)
     p.add_argument("--conds", default="A,B,C,D")
+    p.add_argument("--spec", nargs="*", default=[], help="이름=체크포인트:조건(A~D) 목록. 주면 ckpt·--conds 대신 쓴다")
+    p.add_argument("--pairs", default="", help="짝 비교 '이름1-이름2,...' (기본: 첫 조건 대 나머지)")
     p.add_argument("--out", default="")
     p.add_argument("--device", default="mps" if torch.backends.mps.is_available() else "cpu")
     args = p.parse_args()
-    pol = Policy(args.ckpt, torch.device(args.device))
+    dev = torch.device(args.device)
     base = {"open_min_tier": 3, "emergency": parse_emergency("2,0,5"), "merge_rule": (20, 6)}
-    res = {}
-    for m in args.conds.split(","):
+    if args.spec:
+        specs = [(sp.split("=")[0], *sp.split("=")[1].rsplit(":", 1)) for sp in args.spec]
+    else:
+        specs = [(m, args.ckpt, m) for m in args.conds.split(",")]
+    labels = {name: f"{name} ({CONDS[cond][0]})" if args.spec else f"{name} {CONDS[cond][0]}" for name, _, cond in specs}
+    pairs = [tuple(x.split("-")) for x in args.pairs.split(",") if x] or [(name, specs[0][0]) for name, _, _ in specs[1:]]
+    res, pols = {}, {}
+    for name, ckpt, cond in specs:
         t0 = time.time()
+        pol = pols.setdefault(ckpt, Policy(ckpt, dev))
         c = Restrict(args.games)
-        fin, fins, _ = run(pol, args.games, args.seed, {**base, **CONDS[m][1]}, None, ctl=c)
+        fin, fins, _ = run(pol, args.games, args.seed, {**base, **CONDS[cond][1]}, None, ctl=c)
         c.finish()
-        res[m] = (fin, fins, c)
-        print(f"  조건 {m} {CONDS[m][0]}: {time.time() - t0:.0f}s", flush=True)
-    print(f"\n=== {args.ckpt} · 정상 시작 {args.games}판 (시드 {args.seed}) · 기준 = 연쇄 포함 한 수 은상자 합성 + 준비 이동 1수 ===")
-    report(res, args.games, args.conds.split(",")[0])
+        res[name] = (fin, fins, c)
+        print(f"  {name}: {ckpt} · {CONDS[cond][0]} · {time.time() - t0:.0f}s", flush=True)
+    print(f"\n=== 정상 시작 {args.games}판 (시드 {args.seed}) · 기준 = 연쇄 포함 한 수 은상자 합성 + 준비 이동 1수 ===")
+    for name, ckpt, cond in specs:
+        print(f"  {name}: {ckpt} · {CONDS[cond][0]}")
+    report(res, args.games, labels, pairs)
     if args.out:
         with open(args.out, "w") as f:
             json.dump({m: {"final": r[0].tolist(), "drags": [dict(d) for d in r[2].drags]} for m, r in res.items()}, f, ensure_ascii=False)
