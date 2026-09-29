@@ -103,10 +103,14 @@ class Flow(Priority):
                     self.hold3(i, c, r)
                 elif r[0] > 0:
                     self.g[i]["chain2_states"].append(int(self.step[i]))
-        forced = Priority.choose(self, env, alive, logits, noise, act)
+        forced = self.force(env, alive, logits, noise, act)
         for i, a in forced.items():
             self.g[i]["forced"].append((int(self.step[i]), int(act[i]), int(a)))
         return forced
+
+    def force(self, env, alive, logits, noise, act):
+        """강제 행동 (기본: 한 수 은상자 합성 우선). 하위 클래스가 바꾼다"""
+        return Priority.choose(self, env, alive, logits, noise, act)
 
     def snap(self, i, c, r=None):
         f = {"step": int(self.step[i]), "day": c["day"], "rel_day": c["day"] - int(self.start[i]), "hearts": c["hearts"],
@@ -198,9 +202,9 @@ class Flow(Priority):
         self.step[i] += 1
 
 
-def run(pol, n, seed, rule, starts=None, frames=None):
-    """starts = (hold, k, pool_seed)면 3단계(동상자 2개) 연습 시작, 아니면 정상 시작"""
-    c, fins = Flow(n), []
+def run(pol, n, seed, rule, starts=None, frames=None, ctl=None):
+    """starts = (hold, k, pool_seed)면 3단계(동상자 2개) 연습 시작, 아니면 정상 시작. ctl: Flow 하위 클래스 객체(없으면 Flow)"""
+    c, fins = ctl or Flow(n), []
     if starts is not None:
         hold, k, pool_seed = starts
         env = ts.VecEnv(n, seed=seed, no_toss_day_off=True, **rule)

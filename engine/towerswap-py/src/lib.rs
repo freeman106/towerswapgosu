@@ -883,6 +883,162 @@ impl VecEnv {
         });
         Ok(())
     }
+
+    /// 게임 idx[j]의 난수에 기대지 않는 한 수 은상자 합성 드래그(safe_silver_drags, 가상 시드 seeds개)를 out[j, 행동] = true로 쓴다
+    #[pyo3(signature = (idx, out, seeds = 4))]
+    fn silver_safe_drags(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, mut out: PyReadwriteArrayDyn<'_, bool>, seeds: usize) -> PyResult<()> {
+        let idx = idx.as_slice()?;
+        let o = slice_mut(&mut out, idx.len() * A_DRAG_END, "out")?;
+        let slots = &self.slots;
+        py.detach(|| {
+            self.pool.install(|| {
+                idx.par_iter().zip(o.par_chunks_mut(A_DRAG_END)).for_each(|(&i, o)| {
+                    o.fill(false);
+                    for a in safe_silver_drags(&slots[i as usize].env, seeds) {
+                        o[a] = true;
+                    }
+                })
+            })
+        });
+        Ok(())
+    }
+
+    /// 게임 idx[j]의 준비 이동 1수 → 은상자 합성 1수 경로(prep_silver_paths, 가상 시드 seeds개)의 첫 수를 out[j, 행동] = true로 쓴다
+    #[pyo3(signature = (idx, out, seeds = 4))]
+    fn prep_silver_drags(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, mut out: PyReadwriteArrayDyn<'_, bool>, seeds: usize) -> PyResult<()> {
+        let idx = idx.as_slice()?;
+        let o = slice_mut(&mut out, idx.len() * A_DRAG_END, "out")?;
+        let slots = &self.slots;
+        py.detach(|| {
+            self.pool.install(|| {
+                idx.par_iter().zip(o.par_chunks_mut(A_DRAG_END)).for_each(|(&i, o)| {
+                    o.fill(false);
+                    for (p, _) in prep_silver_paths(&slots[i as usize].env, seeds) {
+                        o[p] = true;
+                    }
+                })
+            })
+        });
+        Ok(())
+    }
+}
+
+/// 가상 판정용 복제본의 난수를 실제 게임의 앞으로의 난수와 무관한 고정 시드 k로 바꾼다
+fn reseed(e: &mut Env, k: usize) {
+    let mut s = 0x5eed_2026_0929_u64 ^ (k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    e.game.rng_v = JsRng::new(splitmix(&mut s) as u32 | 1);
+    e.game.rng_m = JsRng::new(splitmix(&mut s) as u32 | 1);
+}
+
+/// 보드의 은상자 이상 상자 (타일 번호, x, y)
+fn silver_tiles(g: &Game) -> Vec<(usize, i32, i32)> {
+    let mut v = Vec::new();
+    for x in 1..=6i32 {
+        for y in 1..=7i32 {
+            if let Some(t) = g.grid[x as usize][y as usize] {
+                if g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= 3 {
+                    v.push((t, x, y));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// e에 드래그 a를 두면 `before`에 없던 은상자 이상이 생기고 그 직후 열 수 있는지 (e는 바뀐다)
+fn drag_opens_silver(e: &mut Env, a: usize, before: &[usize], m: &mut [bool]) -> bool {
+    if e.step(a).is_none() {
+        return false;
+    }
+    e.mask(m);
+    silver_tiles(&e.game).into_iter().any(|(t, x, y)| !before.contains(&t) && m[A_DRAG_END + (y as usize) * 6 + (x as usize - 1)])
+}
+
+/// 드래그 두 번 안에 은상자 이상이 생길 수 있는지(필요조건): 모루가 있거나, 보드의 보물·일반·동상자로 등급별 3개를 채울 수 있다
+fn silver_possible(g: &Game) -> bool {
+    let mut n = [0u32; 5];
+    let (mut treasure, mut anvil) = (0u32, false);
+    for x in 1..=6usize {
+        for y in 1..=7usize {
+            if let Some(t) = g.grid[x][y] {
+                match g.tiles[t].kind {
+                    Kind::Chest => n[g.tiles[t].tier.min(4) as usize] += 1,
+                    Kind::Treasure => treasure += 1,
+                    Kind::Anvil => anvil = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let normal = n[1] + treasure / 3;
+    let bronze = n[2] + normal / 3;
+    anvil || bronze >= 3 || n[3] + bronze / 3 >= 3
+}
+
+/// 난수에 기대지 않는 한 수 은상자 합성: 지금 마스크에서 유효하고, 난수를 고정 시드 0..k로 바꾼 복제본 모두에서
+/// 은상자 이상이 새로 생기고 직후 열 수 있는 드래그 (동상자 수로 제한하지 않는다. 연쇄 합성·모루 포함)
+fn safe_silver_drags(env: &Env, k: usize) -> Vec<usize> {
+    if env.game.phase != Phase::Idle || !silver_possible(&env.game) {
+        return Vec::new();
+    }
+    let before: Vec<usize> = silver_tiles(&env.game).into_iter().map(|s| s.0).collect();
+    let (mut mask, mut m2) = (vec![false; N_ACTIONS], vec![false; N_ACTIONS]);
+    env.mask(&mut mask);
+    let mut cand: Vec<usize> = (0..A_DRAG_END).filter(|&a| mask[a]).collect();
+    for s in 0..k {
+        let mut base = env.clone();
+        reseed(&mut base, s);
+        cand.retain(|&a| drag_opens_silver(&mut base.clone(), a, &before, &mut m2));
+        if cand.is_empty() {
+            break;
+        }
+    }
+    cand
+}
+
+/// 준비 이동 1수 → 은상자 합성 1수: 상자·모루를 움직이는 드래그 p(지금 마스크에서 유효, p로는 은상자가 안 생김)마다,
+/// 난수를 고정 시드 0..k로 바꾼 복제본 모두에서 p 뒤 같은 드래그 m이 은상자 이상을 만들고 직후 열 수 있으면 (p, m 목록)
+fn prep_silver_paths(env: &Env, k: usize) -> Vec<(usize, Vec<usize>)> {
+    let g = &env.game;
+    if g.phase != Phase::Idle || !silver_possible(g) {
+        return Vec::new();
+    }
+    let before: Vec<usize> = silver_tiles(g).into_iter().map(|s| s.0).collect();
+    let mut mask = vec![false; N_ACTIONS];
+    env.mask(&mut mask);
+    let moves_chest = |a: usize| {
+        let c = a / 4;
+        let (x, y) = ((c % 6) as i32 + 1, (c / 6) as i32 + 1);
+        let (dx, dy) = Dir::from_index(a % 4).delta();
+        [(x, y), (x + dx, y + dy)].iter().any(|&(x, y)| {
+            (1..=6).contains(&x) && (1..=7).contains(&y) && g.tile_at(x, y).map_or(false, |t| matches!(g.tiles[t].kind, Kind::Chest | Kind::Anvil))
+        })
+    };
+    let ps: Vec<usize> = (0..A_DRAG_END).filter(|&a| mask[a] && moves_chest(a)).collect();
+    ps.into_par_iter()
+        .filter_map(|p| {
+            let (mut mk, mut m2) = (vec![false; N_ACTIONS], vec![false; N_ACTIONS]);
+            let mut ms: Option<Vec<usize>> = None;
+            for s in 0..k {
+                let mut e = env.clone();
+                reseed(&mut e, s);
+                if e.step(p).is_none() || e.game.phase != Phase::Idle || silver_tiles(&e.game).iter().any(|t| !before.contains(&t.0)) {
+                    return None;
+                }
+                e.mask(&mut mk);
+                let cand: Vec<usize> = match ms.take() {
+                    None => (0..A_DRAG_END).filter(|&m| mk[m]).collect(),
+                    Some(v) => v.into_iter().filter(|&m| mk[m]).collect(),
+                };
+                let keep: Vec<usize> = cand.into_iter().filter(|&m| drag_opens_silver(&mut e.clone(), m, &before, &mut m2)).collect();
+                if keep.is_empty() {
+                    return None;
+                }
+                ms = Some(keep);
+            }
+            ms.map(|v| (p, v))
+        })
+        .collect()
 }
 
 /// silver_merge_counts의 한 게임 판정
