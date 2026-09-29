@@ -507,7 +507,7 @@ __SPRITE_CSS__
     $("alts").innerHTML = rows.join("");
     $("scrub").value = k;
     const dv = games[gi].diverge;
-    const here = (games[gi].marks || []).filter(([m]) => m === k).map(([, t]) => t);
+    const here = (g.marks || games[gi].marks || []).filter(([m]) => m === k).map(([, t]) => t);
     $("pos").textContent = `행동 ${k + 1} / ${g.frames.length}` + (dv != null ? ` · 두 기록이 처음 갈리는 행동: ${dv + 1}` + (k === dv ? " (지금)" : "") : "")
       + (here.length ? ` · ${here.join(" · ")}` : "");
     document.querySelectorAll("#marks button").forEach((b) => b.setAttribute("aria-current", +b.dataset.k === k));
@@ -557,7 +557,7 @@ __SPRITE_CSS__
     $("games").innerHTML = games.map((g, j) => {
       const b = g.base.day, s = g.search.day, dd = s - b;
       return `<button class="game-btn" data-g="${j}" aria-pressed="${j === gi}"><span class="big">${b}일 → ${s}일</span>` +
-        `<span class="num">${L.bShort} → ${L.aShort} (${dd > 0 ? "+" : ""}${dd}일)</span><span class="how">${L.aShort}: ${how(s)}</span></button>`;
+        `<span class="num">${L.bShort} → ${L.aShort} (${dd > 0 ? "+" : ""}${dd}일)</span><span class="how">${g.label || L.aShort + ": " + how(s)}</span></button>`;
     }).join("");
     $("games").querySelectorAll(".game-btn").forEach((b) => b.addEventListener("click", () => selectGame(+b.dataset.g)));
   }
@@ -585,8 +585,9 @@ __SPRITE_CSS__
     $("scrub").max = g.frames.length - 1;
     const G = games[gi];
     $("condNote").textContent = SINGLE ? (G.note || "") : `이 판: ${L.bShort} ${G.base.day}일, ${L.aShort} ${G.search.day}일${G.note ? " · " + G.note : ""} · 전환해도 같은 행동 번호를 유지합니다`;
-    $("marksPanel").hidden = !(G.marks && G.marks.length);
-    $("marks").innerHTML = (G.marks || []).map(([k, t]) => `<li><button data-k="${k}"><span class="num">행동 ${k + 1}</span>${t}</button></li>`).join("");
+    const MK = g.marks || G.marks || [];
+    $("marksPanel").hidden = !MK.length;
+    $("marks").innerHTML = MK.map(([k, t]) => `<li><button data-k="${k}"><span class="num">행동 ${k + 1}</span>${t}</button></li>`).join("");
     $("marks").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { stop(); show(+b.dataset.k); }));
     $("bDiv").hidden = G.diverge == null;
     renderChart(g);
