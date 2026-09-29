@@ -810,6 +810,49 @@ impl VecEnv {
         Ok(())
     }
 
+    /// 게임 i의 지금 상태에서, 지금 마스크로 유효한 드래그 중 한 번으로 은상자 이상이 새로 만들어지고 그 직후(스왑을 다 써 밤 직전이
+    /// 되더라도) 새 은상자를 열 수 있는(개봉 탭이 마스크에서 유효한) 드래그를 out[행동] = true로 표시한다. 복제본으로 확인하고 게임은 바뀌지 않는다
+    fn silver_merge_drags(&self, i: usize, mut out: PyReadwriteArrayDyn<'_, bool>) -> PyResult<()> {
+        let o = out.as_slice_mut().map_err(|e| PyValueError::new_err(format!("out: {e}")))?;
+        if o.len() != A_DRAG_END {
+            return Err(PyValueError::new_err(format!("out: 길이 {} (기대 {A_DRAG_END})", o.len())));
+        }
+        o.fill(false);
+        let env = &self.slots[i].env;
+        if env.game.phase != Phase::Idle {
+            return Ok(());
+        }
+        let silver = |g: &Game| -> Vec<(usize, i32, i32)> {
+            let mut v = Vec::new();
+            for x in 1..=6i32 {
+                for y in 1..=7i32 {
+                    if let Some(t) = g.grid[x as usize][y as usize] {
+                        if g.tiles[t].kind == Kind::Chest && g.tiles[t].tier >= 3 {
+                            v.push((t, x, y));
+                        }
+                    }
+                }
+            }
+            v
+        };
+        let before: Vec<usize> = silver(&env.game).into_iter().map(|s| s.0).collect();
+        let mut mask = vec![false; N_ACTIONS];
+        env.mask(&mut mask);
+        let mut m2 = vec![false; N_ACTIONS];
+        for a in 0..A_DRAG_END {
+            if !mask[a] {
+                continue;
+            }
+            let mut e = env.clone();
+            if e.step(a).is_none() {
+                continue;
+            }
+            e.mask(&mut m2);
+            o[a] = silver(&e.game).into_iter().any(|(t, x, y)| !before.contains(&t) && m2[A_DRAG_END + (y as usize) * 6 + (x as usize - 1)]);
+        }
+        Ok(())
+    }
+
     /// 게임 i의 지금까지 만들어진 방어물: (종류 5 × 결과 등급 1..4, 종류 5 × 결과 행 0..7), 휴식일 번호
     fn made(&self, i: usize) -> (Vec<Vec<u32>>, Vec<Vec<u32>>, i32) {
         let g = &self.slots[i].env.game;

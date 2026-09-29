@@ -80,3 +80,23 @@ fn placed_silver_pays_nothing() {
     assert!(out.reward.abs() < 1e-4, "연습 배치 은상자에는 재투자 보상이 없다: {}", out.reward);
     assert_eq!(env.reinvest_opens[3], 0);
 }
+
+#[test]
+fn silver_opens_after_last_swap() {
+    // 남은 스왑 1개로 동상자 세 개를 합치면 밤 직전(스왑 0)이 되지만, 은상자부터 여는 규칙에서도 새 은상자는 열 수 있어야 한다
+    use towerswap_core::env::{OpenRule, N_ACTIONS};
+    use towerswap_core::Phase;
+    let mut game = Game::new_game(7, 11);
+    game.load_board(MERGE_BOARD);
+    game.swaps = 1;
+    let mut env = Env::from_game(game);
+    env.open_rule = OpenRule { min_tier: 3, emergency: Some((2, 0, 5)) };
+    env.step(14).expect("합성 드래그가 무효");
+    assert_eq!(env.game.phase, Phase::Dusk, "마지막 스왑을 쓰면 밤 직전이어야 한다");
+    let (x, y) = find_chest(&env.game, 3).expect("은상자가 생겨야 한다");
+    let mut mask = vec![false; N_ACTIONS];
+    env.mask(&mut mask);
+    assert!(mask[tap_action(x, y)], "밤 직전에도 새 은상자 개봉이 마스크에서 켜져야 한다");
+    env.step(tap_action(x, y)).expect("은상자 개봉이 무효");
+    assert!(env.game.swaps > 0, "은상자를 열면 스왑이 생겨야 한다");
+}
