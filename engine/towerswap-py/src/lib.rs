@@ -695,6 +695,31 @@ impl VecEnv {
         Ok(added)
     }
 
+    /// 탐색 환경 슬롯 src의 게임들을 연습 시작 상태(난이도 level)로 풀에 더하며 상자를 놓는다(seed로 배치를 고른다).
+    /// layout: "silver" = 1~6행 자원 하나를 은상자로, "bronze3" = 교환 한 번이면 은상자가 되는 동상자 3개,
+    /// "bronze2" = 동상자 2개(교환 한 번 합성은 안 되는 배치). 놓을 수 없는 상태는 건너뛰고, 더한 수를 돌려준다
+    #[pyo3(signature = (search, src, level, layout, seed = 1))]
+    fn add_starts_layout(&mut self, search: PyRef<'_, SearchEnv>, src: PyReadonlyArray1<'_, i64>, level: u8, layout: &str, seed: u64) -> PyResult<usize> {
+        let mut rng = seed;
+        let mut added = 0;
+        for &j in src.as_slice()? {
+            let slot = search.slots.get(j as usize).ok_or_else(|| PyValueError::new_err(format!("add_starts_layout: 슬롯 {j} 범위 밖")))?;
+            let mut g = slot.env.game.clone();
+            let pick = splitmix(&mut rng);
+            let ok = match layout {
+                "silver" => g.replace_resource_with_chest(3, pick).is_some(),
+                "bronze3" => g.place_bronze_merge(pick),
+                "bronze2" => g.place_two_bronze(pick),
+                _ => return Err(PyValueError::new_err(format!("add_starts_layout: 모르는 배치 {layout}"))),
+            };
+            if ok {
+                self.starts.push(Start { game: g, level, merge: None });
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
     /// 탐색 환경 슬롯 src[j]의 게임을 게임 dst[j]로 가져온다(되돌린 상태에서 이어 두기용). 연습 시작·보조 대상은 지운다.
     fn load_from(&mut self, search: PyRef<'_, SearchEnv>, src: PyReadonlyArray1<'_, i64>, dst: PyReadonlyArray1<'_, i64>) -> PyResult<()> {
         let (src, dst) = (src.as_slice()?, dst.as_slice()?);

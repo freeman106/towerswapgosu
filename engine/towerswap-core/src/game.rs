@@ -4,6 +4,7 @@
 use crate::kinds::{Kind, ALL_KINDS};
 use crate::items::{DevilOffer, Pending};
 use crate::night::NightState;
+use crate::analysis::Board;
 use crate::level::{first_level_terrain, Terrain, COLS, ROWS};
 use crate::rng::JsRng;
 
@@ -1031,6 +1032,76 @@ impl Game {
         tile.born = (steps, day);
         tile.chest_merged = false;
         Some((tile.gx, tile.gy))
+    }
+
+    fn is_resource_at(&self, x: i32, y: i32) -> bool {
+        (1..=6).contains(&y)
+            && self.tile_at(x, y).map_or(false, |t| matches!(self.tiles[t].kind, Kind::Wood | Kind::Stone | Kind::Iron | Kind::Treasure | Kind::IceCube))
+    }
+
+    /// 연습 시작용(2단계): 1~6행 자원 타일 세 곳에 동상자를 놓아 교환 한 번이면 은상자로 합쳐지게 한다.
+    /// 후보 = 가로·세로 세 칸 줄 중 두 칸 + 나머지 한 칸(빈자리)의 옆 칸. 놓을 세 칸은 모두 자원이어야 한다.
+    /// `pick`번째 후보부터 차례로 시도해, 놓은 뒤 교환 한 번 동상자 합성이 가능한 첫 배치를 쓴다. 없으면 바꾸지 않고 false
+    pub fn place_bronze_merge(&mut self, pick: u64) -> bool {
+        let mut cand = Vec::new();
+        for y in 1..=6 {
+            for x in 1..=COLS as i32 {
+                for (dx, dy) in [(1, 0), (0, 1)] {
+                    let line = [(x, y), (x + dx, y + dy), (x + 2 * dx, y + 2 * dy)];
+                    for gap in 0..3 {
+                        let (gx, gy) = line[gap];
+                        for (nx, ny) in [(gx + dy, gy + dx), (gx - dy, gy - dx), (gx + dx, gy + dy), (gx - dx, gy - dy)] {
+                            if line.contains(&(nx, ny)) {
+                                continue;
+                            }
+                            let cells: Vec<(i32, i32)> = (0..3).filter(|&k| k != gap).map(|k| line[k]).chain([(nx, ny)]).collect();
+                            if cells.iter().all(|&(cx, cy)| self.is_resource_at(cx, cy)) && self.tile_at(gx, gy).is_some() {
+                                cand.push(cells);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for k in 0..cand.len() {
+            let cells = &cand[(pick as usize + k) % cand.len()];
+            let mut g = self.clone();
+            for &(cx, cy) in cells {
+                let t = g.tile_at(cx, cy).unwrap();
+                let (steps, day) = (g.stat_steps, g.day);
+                let tile = &mut g.tiles[t];
+                tile.kind = Kind::Chest;
+                tile.tier = 2;
+                tile.frame = 1;
+                tile.dynamite = 0;
+                tile.flipped = false;
+                tile.born = (steps, day);
+                tile.chest_merged = false;
+            }
+            if Board::of(&g).one_swap_chest_merges() & (1 << 2) != 0 {
+                *self = g;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 연습 시작용(3단계): 1~6행 자원 타일 두 곳에 동상자를 놓는다(교환 한 번으로 동상자가 합쳐지는 상태는 피한다).
+    /// `pick`부터 차례로 시도하고, 조건을 만족하는 배치가 없으면 바꾸지 않고 false
+    pub fn place_two_bronze(&mut self, pick: u64) -> bool {
+        for k in 0..64u64 {
+            let mut g = self.clone();
+            if g.replace_resource_with_chest(2, pick.wrapping_add(k * 7919)).is_none()
+                || g.replace_resource_with_chest(2, pick.wrapping_add(k * 104729 + 1)).is_none()
+            {
+                return false;
+            }
+            if Board::of(&g).one_swap_chest_merges() & (1 << 2) == 0 {
+                *self = g;
+                return true;
+            }
+        }
+        false
     }
 
     /// 드래그가 버리기(§5.3 d)인지 (상태 변화 없음)

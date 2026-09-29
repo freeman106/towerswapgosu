@@ -58,6 +58,9 @@ def parse_args():
     p.add_argument("--silver-starts", type=int, default=0,
                    help="은상자 연습(난이도 6) 시작 상태 수: --pool-ckpt 정책이 실제로 둔 게임의 낮 상태에서 1~6행 자원 하나를 은상자로 바꾼다. "
                         "--start-frac 비율로 새 게임을 이 풀에서 시작한다(연습 게임도 끝까지 둔다)")
+    p.add_argument("--stage-starts", default="",
+                   help="동상자 연습 배치 (bronze3: 교환 한 번이면 은상자가 되는 동상자 3개, 난이도 7 / bronze2: 동상자 2개, 난이도 8). "
+                        "--silver-starts와 같은 수집 상태에 놓아 은상자 연습과 같은 수만큼 풀에 더한다(--start-frac는 두 풀 합)")
     p.add_argument("--pool-ckpt", default="", help="연습 상태를 모을 정책 (비우면 --init)")
     p.add_argument("--pool-games", type=int, default=512)
     p.add_argument("--pool-seed", type=int, default=99)
@@ -167,6 +170,7 @@ SUMMARY_KEYS = ["episodes", "score", "day", "day_max", "bosses", "r_survival", "
                 "merge_opps", "merge_take", "hold2_frac", "hold3_frac", "games_hold2", "games_hold3", "emergency", "merge_rule",
                 "r_reinvest", "reinvest3", "reinvest4"]
 SILVER_LEVEL = 6  # 은상자 연습 시작의 난이도 번호
+STAGE_LEVEL = {"bronze3": 7, "bronze2": 8}  # 동상자 연습 시작의 난이도 번호
 PRACTICE_STATS = ("episodes", "success_path", "success_day", "ready_no_merge", "merge_take", "made2")
 PRACTICE_KEYS = [f"p{lv}_{k}" for lv in (1, 2, 3, 4) for k in PRACTICE_STATS]
 
@@ -288,6 +292,11 @@ def main():
         added = env.add_starts(hold, np.arange(k, dtype=np.int64), SILVER_LEVEL, place_tier=3, seed=args.pool_seed)
         env.set_start_frac(args.start_frac)
         print(f"은상자 연습 시작 상태 {added}개: {describe(info)} ({time.time() - t0:.0f}s), 비율 {args.start_frac}", flush=True)
+        if args.stage_starts:
+            added2 = env.add_starts_layout(hold, np.arange(k, dtype=np.int64), STAGE_LEVEL[args.stage_starts], args.stage_starts,
+                                           seed=args.pool_seed)
+            print(f"동상자 연습({args.stage_starts}, 난이도 {STAGE_LEVEL[args.stage_starts]}) 시작 상태 {added2}개 "
+                  f"(연습 비율 {args.start_frac}를 은상자 연습과 나눔)", flush=True)
         del pool_pol, hold
     grid = np.zeros((N, C, H, W), np.float32)
     scal = np.zeros((N, S), np.float32)
@@ -329,7 +338,7 @@ def main():
     n_updates = args.total_steps // (N * T)
     log_f = open(os.path.join(run_dir, "log.csv"), "a", newline="")
     log = csv.writer(log_f)
-    if start_update == 1:
+    if log_f.tell() == 0:
         log.writerow(["update", "step", "sps"] + SUMMARY_KEYS + PRACTICE_KEYS +
                      ["pg_loss", "v_loss", "entropy", "approx_kl", "clipfrac", "explained_var", "aux_coef", "aux_merge_p", "aux_frac"])
     t_start, step0 = time.time(), global_step
@@ -462,6 +471,13 @@ def main():
                 pr += (f" | 은상자 연습 {len(sv)}게임 개봉 {np.mean(op >= 1):.0%}·둘째 {np.mean(op >= 2):.0%}·셋째 {np.mean(op >= 3):.0%} "
                        f"이후 생존 {np.mean([f['day'] - f['start_day'] for f in sv]):.1f}일 "
                        f"합성 우선 {np.mean([f['merge_rule_uses'] for f in sv]):.1f} 재투자 보상 {np.mean([f['r_reinvest'] for f in sv]):.2f}")
+            for lay, lv in STAGE_LEVEL.items():
+                bz = [f for f in ep_hist if f["practice_level"] == lv]
+                if bz:
+                    pr += (f" | 동상자 연습({lay}) {len(bz)}게임 은상자 합성 {np.mean([f['made'][2] > 0 for f in bz]):.0%}·"
+                           f"합성 은상자 개봉 {np.mean([f['reinvest_opens'][2] > 0 for f in bz]):.0%} 비상 개봉 "
+                           f"{np.mean([f['emergency_opens'] for f in bz]):.2f} 이후 생존 {np.mean([f['day'] - f['start_day'] for f in bz]):.1f}일 "
+                           f"재투자 보상 {np.mean([f['r_reinvest'] for f in bz]):.2f}")
             print(f"[{update}/{n_updates}] step {global_step:,} sps {sps:,.0f} (롤아웃 {t_roll:.1f}s) | 정상 시작 "
                   f"{format_summary(episode_summary([f for f in ep_hist if not f['practice']]))}{pr} | "
                   f"pg {st[0]:.4f} v {st[1]:.4f} ent {st[2]:.3f} kl {st[3]:.4f} ev {ev:.3f} rstd {rstd.std:.4f}"
