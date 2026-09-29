@@ -41,6 +41,7 @@ struct Slot {
     aux: Option<Vec<bool>>,   // 지금 상태가 보조 손실 대상이면 그 행동 집합 M(s)
     aux_prep: bool,           // aux가 준비 이동 집합이면 참: 그중 하나를 고르면 다음 상태에 합성 행동 집합을 붙인다
     aux_hold: Option<i32>,    // 보관 연습(5단계) 시작일: 확인 구간(이틀) 동안 매 결정에 투자 greedy의 최선 행동 집합을 붙인다
+    allow_once: Option<usize>, // 다음 step의 행동이 이것이면 합성 우선 규칙만 끄고 한 번 적용한다(개입 한 수용)
 }
 
 /// 연습 시작 상태. `merge`는 합성이 유리하다고 확인된 경우의 합성 행동 집합 M(s)
@@ -377,6 +378,7 @@ impl VecEnv {
                     aux: None,
                     aux_prep: false,
                     aux_hold: None,
+                    allow_once: None,
                 };
                 s.new_game(&[], 0.0);
                 s
@@ -554,7 +556,11 @@ impl VecEnv {
                         let prep_hit = slot.aux_prep && slot.aux.as_ref().map_or(false, |m| (a as usize) < N_ACTIONS && m[a as usize]);
                         slot.aux = None;
                         slot.aux_prep = false;
-                        let o = slot.env.step(a as usize).ok_or_else(|| format!("환경 {i}: 무효 행동 {a} (단계 {phase:?})"))?;
+                        let bypass = slot.allow_once.take() == Some(a as usize);
+                        let rule = if bypass { slot.env.merge_rule.take() } else { slot.env.merge_rule };
+                        let o = slot.env.step(a as usize);
+                        slot.env.merge_rule = rule;
+                        let o = o.ok_or_else(|| format!("환경 {i}: 무효 행동 {a} (단계 {phase:?})"))?;
                         slot.steps += 1;
                         *r = o.reward;
                         *dy = o.days as f32;
@@ -755,6 +761,7 @@ impl VecEnv {
             slot.aux = None;
             slot.aux_prep = false;
             slot.aux_hold = None;
+            slot.allow_once = None;
         }
         Ok(())
     }
@@ -938,6 +945,22 @@ impl VecEnv {
                 })
             })
         });
+        Ok(())
+    }
+
+    /// 게임 idx[j]마다 드래그 한 번의 은 공격 무기 합성 후보 목록(silver_weapon_plans, 가상 시드 seeds개)
+    #[pyo3(signature = (idx, seeds = 4))]
+    fn silver_weapon_plans(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, seeds: usize) -> PyResult<Vec<Vec<SilverPlan>>> {
+        let idx = idx.as_slice()?.to_vec();
+        let slots = &self.slots;
+        Ok(py.detach(|| self.pool.install(|| idx.par_iter().map(|&i| silver_weapon_plans(&slots[i as usize].env, seeds)).collect())))
+    }
+
+    /// 게임 i의 다음 step 행동이 a이면 그 한 번만 합성 우선 규칙을 끄고 적용한다(다른 규칙·원래 게임 규칙은 그대로, 다음 step에 지워진다).
+    /// 기본→동 합성 우선 규칙이 가린 동→은 합성 개입 한 수용. 원래 게임 규칙상 유효한 드래그인지는 부르는 쪽이 silver_weapon_plans로 확인한다
+    fn allow_once(&mut self, i: usize, a: usize) -> PyResult<()> {
+        let slot = self.slots.get_mut(i).ok_or_else(|| PyValueError::new_err(format!("allow_once: 게임 {i} 범위 밖")))?;
+        slot.allow_once = Some(a);
         Ok(())
     }
 }
@@ -1225,6 +1248,77 @@ fn teacher_plans(env: &Env, k: usize) -> Vec<TeachPlan> {
         .collect();
     plans.extend(two);
     plans
+}
+
+/// 동→은 무기 합성 후보 하나: (드래그, 지금 마스크에서 유효한지, 공격 무기 생성 수 [종류 3 × 등급 4],
+/// 새로 생긴·등급이 오른 공격 무기 (종류, 등급, x, y), 없어지거나 등급이 바뀐 공격 무기 (종류, 드래그 전 등급, 드래그 전 x, y))
+type SilverPlan = (i64, bool, Vec<i32>, Vec<(String, i32, i32, i32)>, Vec<(String, i32, i32, i32)>);
+
+/// 드래그 한 번의 은 공격 무기 합성 후보. 합성 우선 규칙만 끈 복제본에서 원래 게임 규칙상 유효하고(다른 환경 규칙은 그대로),
+/// 실제 난수 대신 고정 가상 시드 0..k를 쓴 모든 복제본에서 은 공격 무기가 생기고 금은 생기지 않으며 공격 무기 생성 결과가 같은 드래그
+fn silver_weapon_plans(env: &Env, k: usize) -> Vec<SilverPlan> {
+    let g0 = &env.game;
+    if g0.phase != Phase::Idle || g0.day == g0.day_off_day {
+        return Vec::new();
+    }
+    let mut mask = vec![false; N_ACTIONS];
+    env.mask(&mut mask);
+    let mut raw = env.clone();
+    raw.merge_rule = None;
+    let seeded: Vec<Env> = (0..k)
+        .map(|s| {
+            let mut e = raw.clone();
+            reseed(&mut e, s);
+            e
+        })
+        .collect();
+    let attack = |g: &Game| -> Vec<(usize, Kind, u8, i32, i32)> { weapon_map(g).0.into_iter().filter(|w| w.1 != Kind::IceWall).collect() };
+    let w0 = attack(g0);
+    let mut out = Vec::new();
+    for a in 0..A_DRAG_END {
+        let c = a / 4;
+        if !g0.drag_valid((c % 6) as i32 + 1, (c / 6) as i32 + 1, Dir::from_index(a % 4)) {
+            continue;
+        }
+        let (mut sig, mut end) = (None, None);
+        let mut ok = true;
+        for e0 in &seeded {
+            let mut e = e0.clone();
+            if e.step(a).is_none() {
+                ok = false;
+                break;
+            }
+            let m = attack_made(g0, &e.game);
+            if sig.map_or(false, |x| x != m) {
+                ok = false;
+                break;
+            }
+            sig = Some(m);
+            if end.is_none() {
+                end = Some(e);
+            }
+        }
+        let (m, e) = match (ok, sig, end) {
+            (true, Some(m), Some(e)) => (m, e),
+            _ => continue,
+        };
+        if m.iter().all(|r| r[2] == 0) || m.iter().any(|r| r[3] > 0) {
+            continue;
+        }
+        let w1 = attack(&e.game);
+        let created = w1
+            .iter()
+            .filter(|&&(t, k, tier, _, _)| !w0.iter().any(|&(t0, k0, tier0, _, _)| t0 == t && k0 == k && tier0 == tier))
+            .map(|&(_, k, tier, x, y)| (k.id().to_string(), tier as i32, x, y))
+            .collect();
+        let consumed = w0
+            .iter()
+            .filter(|&&(t, k, tier, _, _)| !w1.iter().any(|&(t1, k1, tier1, _, _)| t1 == t && k1 == k && tier1 == tier))
+            .map(|&(_, k, tier, x, y)| (k.id().to_string(), tier as i32, x, y))
+            .collect();
+        out.push((a as i64, mask[a], m.iter().flatten().copied().collect(), created, consumed));
+    }
+    out
 }
 
 /// silver_merge_counts의 한 게임 판정
