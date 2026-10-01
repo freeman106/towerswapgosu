@@ -956,6 +956,19 @@ impl VecEnv {
         Ok(py.detach(|| self.pool.install(|| idx.par_iter().map(|&i| silver_weapon_plans(&slots[i as usize].env, seeds)).collect())))
     }
 
+    /// 게임 idx[j]에서 행동 acts[j]를 가상 시드 seeds개 복제본에 적용한 결과(action_effects): 계획 선택기의 기준 행동 특징용
+    #[pyo3(signature = (idx, acts, seeds = 4))]
+    fn action_effects(&self, py: Python<'_>, idx: PyReadonlyArray1<'_, i64>, acts: PyReadonlyArray1<'_, i64>, seeds: usize) -> PyResult<Vec<ActionEffect>> {
+        let (idx, acts) = (idx.as_slice()?.to_vec(), acts.as_slice()?.to_vec());
+        if idx.len() != acts.len() {
+            return Err(PyValueError::new_err("action_effects: idx, acts 길이가 다르다"));
+        }
+        let slots = &self.slots;
+        Ok(py.detach(|| {
+            self.pool.install(|| idx.par_iter().zip(acts.par_iter()).map(|(&i, &a)| action_effects(&slots[i as usize].env, a as usize, seeds)).collect())
+        }))
+    }
+
     /// 게임 i의 다음 step 행동이 a이면 그 한 번만 합성 우선 규칙을 끄고 적용한다(다른 규칙·원래 게임 규칙은 그대로, 다음 step에 지워진다).
     /// 기본→동 합성 우선 규칙이 가린 동→은 합성 개입 한 수용. 원래 게임 규칙상 유효한 드래그인지는 부르는 쪽이 silver_weapon_plans로 확인한다
     fn allow_once(&mut self, i: usize, a: usize) -> PyResult<()> {
@@ -1319,6 +1332,36 @@ fn silver_weapon_plans(env: &Env, k: usize) -> Vec<SilverPlan> {
         out.push((a as i64, mask[a], m.iter().flatten().copied().collect(), created, consumed));
     }
     out
+}
+
+/// 행동 하나의 가상 결과: (유효, 모든 시드에서 공격 무기 생성 결과가 같음, 공격 무기 생성 수 [종류 3 × 등급 4](시드 0),
+/// 새로 생긴·등급이 오른 공격 무기 (종류, 등급, x, y)(시드 0), 없어진 무기·얼음벽 (종류, 등급)(시드 0, teach_detail과 같은 정의),
+/// 자원 칸 변화(시드 평균), 스왑 변화(시드 평균, 쓴 스왑이면 음수))
+type ActionEffect = (bool, bool, Vec<i32>, Vec<(String, i32, i32, i32)>, Vec<(String, i32)>, f32, f32);
+
+/// 지금 상태에서 행동 a를 고정 가상 시드 0..k 복제본에 적용한 결과 (실제 게임의 앞으로의 난수는 쓰지 않는다)
+fn action_effects(env: &Env, a: usize, k: usize) -> ActionEffect {
+    let g0 = &env.game;
+    let (mut sig, mut same, mut first) = (None, true, None);
+    let (mut res, mut swaps) = (0.0f32, 0.0f32);
+    for s in 0..k {
+        let mut e = env.clone();
+        reseed(&mut e, s);
+        if e.step(a).is_none() {
+            return (false, false, vec![0; 12], Vec::new(), Vec::new(), 0.0, 0.0);
+        }
+        let m = attack_made(g0, &e.game);
+        same &= sig.map_or(true, |x| x == m);
+        sig.get_or_insert(m);
+        let (_, _, r) = teach_detail(g0, &e.game);
+        res += r as f32;
+        swaps += (e.game.swaps - g0.swaps) as f32;
+        if first.is_none() {
+            first = Some(e);
+        }
+    }
+    let (created, lost, _) = teach_detail(g0, &first.unwrap().game); // 교사 후보(teacher_plans)와 같은 정의
+    (true, same, sig.unwrap().iter().flatten().copied().collect(), created, lost, res / k as f32, swaps / k as f32)
 }
 
 /// silver_merge_counts의 한 게임 판정
